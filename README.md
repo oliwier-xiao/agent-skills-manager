@@ -36,6 +36,16 @@ above: what every skill listing adds to every turn before you have typed a word,
 are actually running. The default is the mark alone, because a bar is contested space — leave the
 label off and nothing runs until you open the panel.
 
+To put the figure there, set **Next to the bar icon** to **Always-on tokens** in the widget's
+settings, or from a terminal:
+
+```
+omarchy bar set oliwier.agent-skills-manager barLabel "Always-on tokens"
+```
+
+The bar picks it up without a restart. The same setting offers `Skills enabled`, which counts items
+rather than cost, and `Needs attention`, which stays hidden until something is wrong.
+
 ---
 
 ## Install
