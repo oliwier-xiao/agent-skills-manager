@@ -123,12 +123,20 @@ Panel {
   readonly property int colScope: Style.space(52)
   readonly property int colKind: Style.space(48)
   // Fixed for the same reason colKind and colScope are: a column that moves
-  // with its own content is not a column. 190 is chosen for this machine's own
-  // names -- short enough that the space reclaimed from the old elastic gap
-  // still reads as space, wide enough that almost nothing here needs its second
-  // line. wrapMode and maximumLineCount on the name itself are this width's
-  // overflow valve for the rare longer one, not the normal case.
-  readonly property int colName: Style.space(190)
+  // with its own content is not a column.
+  //
+  // The panel is a fixed 720 wide and everything on a row adds up to less, so
+  // some slack exists whatever is done with it; the only question is where it
+  // sits. At 190 it sat between the agents strip and the tokens figure, and 158
+  // pixels of nothing in the middle of a row reads as a fault rather than as
+  // separation -- the eye crosses it looking for the column that went missing.
+  // Spent on the name instead, the same pixels are trailing space inside a
+  // left-aligned column, which is what every table does and reads as room. What
+  // is left between the two halves is a separator you can see and not a hole.
+  //
+  // wrapMode and maximumLineCount on the name are this width's overflow valve
+  // for a name longer than it, not the normal case.
+  readonly property int colName: Style.space(300)
 
   // `g` cycles this for the session; the setting owns the default.
   property string groupOverride: ""
