@@ -3,25 +3,28 @@
 Every skill, plugin and MCP server your coding agents load, in one list on your Omarchy bar.
 
 Claude Code, OpenCode, Codex, Cursor and Pi each keep theirs somewhere else — ten skill roots, five
-config files, and connectors that live nowhere on disk at all. Some of it is the same skill reached
-from four directories, paid for four times. None of the five will tell you what the other four are
-loading.
+config files, and connectors that live nowhere on disk at all. None of the five will tell you what
+the other four are loading.
 
-This widget is that view: one searchable list of everything all five can load, with what each item
-costs you in tokens on every turn, which agent can see it, and the command that invokes it — on your
-clipboard, in the spelling that particular agent expects.
+This is that list: everything all five can load, with what it costs in tokens on every turn, which
+agent can see it, and the command that invokes it — on your clipboard, in the spelling that agent
+expects.
 
 ![The panel, grouped by category](docs/panel.png)
 
-The boxes across the top count it three ways — by agent, by kind, by what is flagged — and each of
-them is also a filter. The five agent boxes rarely agree, and the disagreement is the point. On the
-machine these screenshots come from, OpenCode carries **35** items for **~4.5k** tokens a turn,
-Cursor **29** for **~2.0k**, Claude Code **24** for **~1.4k**, Pi **3** for **~499** and Codex **2**
-for **~272** — one set of files, five very different bills.
+The boxes across the top count it by agent, by kind and by what is flagged, and each one is also a
+filter. The agent boxes rarely agree, and the disagreement is the point:
 
-The overlap is not a rounding error. Cursor reads Claude Code's skill directory, Codex's and the
-shared one; OpenCode reads two of the same. Most of what you installed for one agent is being paid
-for by several.
+| Agent | Items | Tokens, every turn |
+|---|---|---|
+| OpenCode | 35 | ~4.5k |
+| Cursor | 29 | ~2.0k |
+| Claude Code | 24 | ~1.4k |
+| Pi | 3 | ~499 |
+| Codex | 2 | ~272 |
+
+One set of files, five bills. The agents read each other's directories, so most of what you
+installed for one is being paid for by several.
 
 An Omarchy 4 (Quattro) shell plugin (`bar-widget`). It needs `omarchy-shell` and `python3`, which a
 stock Omarchy install already has.
@@ -63,16 +66,20 @@ configuration, and `/proc/<pid>/comm` to see which agent is running.
 | `~/.grok/skills` | Cursor |
 
 Those are the defaults, not the answer on every machine. OpenCode resolves its own through the
-environment and the panel follows it rather than guessing: `XDG_CONFIG_HOME` **moves** the config
-root and the skills root with it, `OPENCODE_CONFIG_DIR` **adds** a second one, `XDG_CACHE_HOME` and
-`XDG_DATA_HOME` move the fetched-skills root and the MCP token file, and `OPENCODE_CONFIG` and
-`OPENCODE_CONFIG_CONTENT` each merge a further configuration in. Where `opencode.jsonc` sits beside
-`opencode.json`, the `.jsonc` is the one OpenCode loads — so it is the one read here, and the other
-is reported as shadowed rather than quietly used instead.
+environment, and the panel follows rather than guessing:
 
-Cursor is the greediest reader on the machine and the reason a row can carry five marks: its own
-bundle names nine skill directories, four of which belong to other agents. Pi is the opposite and
-reads nobody else's.
+| Variable | What it does |
+|---|---|
+| `XDG_CONFIG_HOME` | **moves** the config root, and the skills root with it |
+| `OPENCODE_CONFIG_DIR` | **adds** a second root, takes none away |
+| `XDG_CACHE_HOME` · `XDG_DATA_HOME` | move the fetched-skills root and the MCP token file |
+| `OPENCODE_CONFIG` · `OPENCODE_CONFIG_CONTENT` | each merge a further configuration in |
+
+Where `opencode.jsonc` sits beside `opencode.json`, the `.jsonc` is the one OpenCode loads — so it
+is the one read here, and the other is reported as shadowed rather than quietly used instead.
+
+Cursor is the greediest reader here and the reason a row can carry five marks: its own bundle names
+nine skill directories, four of them other agents'. Pi reads nobody else's.
 
 It writes two files, both its own and both under `~/.config/agent-skills`:
 
@@ -107,14 +114,14 @@ file that state is written in**, so a claim on this panel is one you can go and 
 names no file, because Cursor ships no per-skill switch to name.
 
 Then every path it is reachable from, marked `real` or `symlink`; its category, as a control you can
-click; the invocation for each agent; how the category was chosen and how confident that guess was;
-the version its author declared, where one is declared at all; the content hash the drift check
-compares; and the token figure with the divisor that produced it. **note** sits in the corner.
+click; the invocation for each agent; how the category was chosen and how sure that was; the version
+its author declared, where one is declared; the content hash the drift check compares; and the token
+figure with the divisor that produced it. **note** sits in the corner.
 
-Nothing here is checked against anywhere upstream. A skill directory is not a checkout — it has no
-remote, no recorded commit and usually no version — so there is no honest way to say whether a newer
-one exists, and the panel does not pretend otherwise. Where two copies of one name declare different
-versions, that is reported as drift, which is a comparison between two things it can actually see.
+Nothing is checked against anywhere upstream. A skill directory is not a checkout — no remote, no
+recorded commit, usually no version — so there is no honest way to say a newer one exists, and the
+panel does not pretend. Two copies of one name declaring different versions is drift, which is a
+comparison between two things it can actually see.
 
 ### One skill, five agents
 
@@ -130,15 +137,15 @@ their contents are told apart by content hash and flagged as drift.
 
 ![The rows that are flagged](docs/attention.png)
 
-`!` shows only what needs looking at, and every count in the header narrows with it. **A skill
-answering to two names:** the directory is `taste-skill`; the `SKILL.md` inside declares
-`name: design-taste-frontend`. Claude Code invokes a skill by its directory, the other four by the
-name it declares — so the same file is `/taste-skill` in one and `/design-taste-frontend` in the
-rest. Copy the wrong one and nothing happens, with no error to say why. The row carries both,
+`!` shows only what needs looking at, and every count in the header narrows with it.
+
+**A skill answering to two names:** the directory is `taste-skill`, the `SKILL.md` inside declares
+`name: design-taste-frontend`, and Claude Code keys by the first while the other four key by the
+second. Copy the wrong one and nothing happens, with no error to say why — so the row carries both,
 against the agent each belongs to.
 
-**A server whose token has expired:** `n8n-mcp` is remote and its stored credentials have run out,
-and OpenCode will not say so until the moment you need it.
+**A server whose token has expired:** `n8n-mcp` is remote, its stored credentials have run out, and
+OpenCode will not say so until the moment you need it.
 
 The list stays quiet about everything else. A category the classifier was unsure of is not a
 problem, and is not reported as one.
@@ -196,11 +203,10 @@ cannot place lands in **Unsorted** rather than being pushed into whichever one w
 `^M` moves a row, and an expanded row shows its category as a control — so the correction sits next
 to the thing being corrected. Type a name nothing answers to and it becomes a new one.
 
-An expanded row says how it was filed on its **placed by** line — the marketplace listing, the
-skill's own frontmatter, where it is installed, its description and how sure that was, or you. It is
-worth reading while you are deciding whether to trust the filing, and repetition on every card
-afterwards, so the `×` at the end of the line turns it off everywhere at once. The category index
-carries a **show placed by** chip while it is off, and that is the way back.
+Its **placed by** line says how it was filed: the marketplace listing, the skill's own frontmatter,
+where it is installed, its description and how sure that was, or you. Worth reading while you decide
+whether to trust the filing, and repetition once you do — so the `×` at the end turns it off on
+every card at once, and a **show placed by** chip in the category index is the way back.
 
 ![The category index](docs/categories.png)
 
@@ -233,10 +239,9 @@ the skill is for in your own words, or in your own language — the search reads
 It is kept in this widget's own file and filed under the skill's name, so every copy of a name shows
 the same note. Leaving the field empty clears it; that is the only way one goes.
 
-The description underneath it is the file's own, shown as it stands. This widget reports it and does
-not write it: what an agent loads on its next turn is not a bar widget's to change, however good the
-confirmation. If a description is costing you more than it earns, the file is `SKILL.md` in the path
-the card names, and your editor is the right tool for it.
+The description underneath it is the file's own, shown as it stands and never written from here. If
+one is costing you more than it earns, the file is `SKILL.md` in the path the card names, and your
+editor is the right tool for it.
 
 ---
 
@@ -346,11 +351,10 @@ omarchy plugin update oliwier.agent-skills-manager
 omarchy restart shell
 ```
 
-The restart is not optional. The shell reloads a plugin by re-reading its directory, but a QML
-component it has already built keeps the code it was built from — so the widget on your bar goes on
-running the old version, with nothing to tell you: the new files are on disk and `omarchy plugin
-list` shows the new number. It is a known Quickshell component-cache limitation, reported upstream
-several times over.
+The restart is not optional. A QML component the shell has already built keeps the code it was built
+from, so the widget goes on running the old version with nothing to tell you — the new files are on
+disk and `omarchy plugin list` shows the new number. A known Quickshell component-cache limitation,
+reported upstream several times over.
 
 ## Remove
 
@@ -433,12 +437,11 @@ Tests are plain `unittest` and need nothing that is not already here.
 python3 -m unittest discover -s tests -v
 ```
 
-`tests/preflight.sh` checks this repository against the Omarchy plugin marketplace's published rules
-— the structural validator, the automated security baseline, and the recurring demands of its manual
-review — and exits non-zero on any violation. It also runs `qmllint` against every QML document with
-the `qs` module resolved, under a per-file warning ceiling, because a gate pointed at the wrong
-import path measures the import failure rather than the document. CI runs it on every push and pull
-request, so run it before proposing a change and meet it locally rather than on the branch.
+`tests/preflight.sh` checks the repository against the marketplace's published rules — the
+structural validator, the security baseline, and the recurring demands of its manual review — and
+exits non-zero on any violation. It also runs `qmllint` with the `qs` module resolved, under a
+per-file warning ceiling: a gate pointed at the wrong import path measures the import failure rather
+than the document. CI runs it on every push, so meet it locally rather than on the branch.
 
 ## License
 
