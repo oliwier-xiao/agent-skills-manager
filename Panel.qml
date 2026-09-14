@@ -4829,10 +4829,21 @@ Panel {
         // panel is for, and three rows of filter on a machine with fifteen
         // categories takes more than it gives. So it is one row until you say
         // otherwise, and it stays open once you have.
+        // The strip outlives its chips, because `all` lives in it and `all` is the
+        // only thing on screen that undoes a filter. Categories belong to skills
+        // alone, so filtering to servers or to plugins empties this row -- and
+        // hiding the row on that count took the way out with it. Two clicks, kind
+        // then attention, and the panel had nothing left to click: Escape still
+        // worked and the footer still said so, but a filter you can set with the
+        // mouse and only clear with the keyboard is a trap, and it springs exactly
+        // when the list has gone quiet enough to look broken.
+        //
+        // So: visible while there are shelves to pick from, and visible while
+        // there is anything to undo. Both false and it is gone as before.
         Item {
           id: filterStrip
           width: parent.width
-          visible: root.categoryChips.length > 0
+          visible: root.categoryChips.length > 0 || root.anyChipFilter
           height: visible ? (root.filtersExpanded ? catFlow.implicitHeight
                                                   : catFlow.rowHeight) : 0
           clip: true
