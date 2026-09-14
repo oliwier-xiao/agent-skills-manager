@@ -4997,6 +4997,106 @@ Panel {
           }
         }
 
+        // What it costs, per agent, with that agent's mark and how many of the
+        // rows above it can see. Its own row, because it answers a different
+        // question from the one below and the two were competing for the same
+        // line -- and now it is the whole of that row, the grouping switch having
+        // moved down to the counts.
+        //
+        // The chips share the width rather than leaving it at the end. Each keeps
+        // the width its own label needs and takes an equal share of what is left
+        // over, so the row reads as one band across the panel instead of five
+        // boxes and a margin. Only while they fit on one line: a narrower panel,
+        // another agent or a filter that changes the roster puts the slack back
+        // at zero and the Flow wraps as it always did.
+        Flow {
+          id: toolFlow
+          width: parent.width
+          visible: root.loaded && root.toolChips.length > 0
+          spacing: Style.spacing.sm
+
+          readonly property real naturalContentWidth: {
+            var total = 0
+            for (var i = 0; i < chipRepeater.count; i++) {
+              var it = chipRepeater.itemAt(i)
+              if (it) total += it.implicitWidth
+            }
+            return total + Math.max(0, chipRepeater.count - 1) * toolFlow.spacing
+          }
+          readonly property bool fitsOneLine:
+            chipRepeater.count > 0 && toolFlow.naturalContentWidth <= toolFlow.width
+          readonly property real stretchPerChip: toolFlow.fitsOneLine
+            ? Math.max(0, (toolFlow.width - toolFlow.naturalContentWidth) / chipRepeater.count)
+            : 0
+
+          Repeater {
+            id: chipRepeater
+            model: root.toolChips
+
+            Rectangle {
+              id: toolChip
+              required property var modelData
+              readonly property bool on: root.toolFilter === toolChip.modelData.tool
+
+              implicitWidth: toolChipRow.implicitWidth + Style.space(18)
+              width: toolChip.implicitWidth + toolFlow.stretchPerChip
+              height: Style.space(24)
+              radius: Style.cornerRadius
+              color: Util.alpha(toolChip.modelData.colour,
+                                toolChip.on ? 0.34 : (toolHover.hovered ? 0.22 : 0.13))
+
+              Row {
+                id: toolChipRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.sm
+
+                AgentMark {
+                  anchors.verticalCenter: parent.verticalCenter
+                  agent: toolChip.modelData.tool
+                  size: Style.space(12)
+                  color: toolChip.modelData.colour
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.label
+                  color: toolChip.on ? root.fg : root.readable
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.count
+                  color: root.soft
+                  font.family: root.face
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: text !== ""
+                  textFormat: Text.PlainText
+                  text: toolChip.modelData.tokens
+                  color: root.fg
+                  font.family: root.face
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              HoverHandler { id: toolHover; cursorShape: Qt.PointingHandCursor }
+              TapHandler {
+                onTapped: {
+                  root.toolFilter = toolChip.on ? "" : String(toolChip.modelData.tool)
+                  root.selectedIndex = 0
+                }
+              }
+            }
+          }
+        }
+
         // What was counted. Wraps rather than eliding, so the last number is
         // never the one that gets cut.
         //
@@ -5130,106 +5230,6 @@ Panel {
                 // return to.
                 TapHandler {
                   onTapped: if (!modeChip.on) root.setGrouping(String(modeChip.modelData.key))
-                }
-              }
-            }
-          }
-        }
-
-        // What it costs, per agent, with that agent's mark and how many of the
-        // rows above it can see. Its own row, because it answers a different
-        // question from the one above and the two were competing for the same
-        // line -- and now it is the whole of that row, the grouping switch having
-        // moved up to the counts.
-        //
-        // The chips share the width rather than leaving it at the end. Each keeps
-        // the width its own label needs and takes an equal share of what is left
-        // over, so the row reads as one band across the panel instead of five
-        // boxes and a margin. Only while they fit on one line: a narrower panel,
-        // another agent or a filter that changes the roster puts the slack back
-        // at zero and the Flow wraps as it always did.
-        Flow {
-          id: toolFlow
-          width: parent.width
-          visible: root.loaded && root.toolChips.length > 0
-          spacing: Style.spacing.sm
-
-          readonly property real naturalContentWidth: {
-            var total = 0
-            for (var i = 0; i < chipRepeater.count; i++) {
-              var it = chipRepeater.itemAt(i)
-              if (it) total += it.implicitWidth
-            }
-            return total + Math.max(0, chipRepeater.count - 1) * toolFlow.spacing
-          }
-          readonly property bool fitsOneLine:
-            chipRepeater.count > 0 && toolFlow.naturalContentWidth <= toolFlow.width
-          readonly property real stretchPerChip: toolFlow.fitsOneLine
-            ? Math.max(0, (toolFlow.width - toolFlow.naturalContentWidth) / chipRepeater.count)
-            : 0
-
-          Repeater {
-            id: chipRepeater
-            model: root.toolChips
-
-            Rectangle {
-              id: toolChip
-              required property var modelData
-              readonly property bool on: root.toolFilter === toolChip.modelData.tool
-
-              implicitWidth: toolChipRow.implicitWidth + Style.space(18)
-              width: toolChip.implicitWidth + toolFlow.stretchPerChip
-              height: Style.space(24)
-              radius: Style.cornerRadius
-              color: Util.alpha(toolChip.modelData.colour,
-                                toolChip.on ? 0.34 : (toolHover.hovered ? 0.22 : 0.13))
-
-              Row {
-                id: toolChipRow
-                anchors.centerIn: parent
-                spacing: Style.spacing.sm
-
-                AgentMark {
-                  anchors.verticalCenter: parent.verticalCenter
-                  agent: toolChip.modelData.tool
-                  size: Style.space(12)
-                  color: toolChip.modelData.colour
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: toolChip.modelData.label
-                  color: toolChip.on ? root.fg : root.readable
-                  font.family: root.face
-                  font.pixelSize: Style.font.caption
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: toolChip.modelData.count
-                  color: root.soft
-                  font.family: root.face
-                  font.pixelSize: Style.font.caption
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  visible: text !== ""
-                  textFormat: Text.PlainText
-                  text: toolChip.modelData.tokens
-                  color: root.fg
-                  font.family: root.face
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-
-              HoverHandler { id: toolHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler {
-                onTapped: {
-                  root.toolFilter = toolChip.on ? "" : String(toolChip.modelData.tool)
-                  root.selectedIndex = 0
                 }
               }
             }
