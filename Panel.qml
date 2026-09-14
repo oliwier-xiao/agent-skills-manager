@@ -3153,13 +3153,26 @@ Panel {
 
     // A skill that documents alternatives says how many, before you reach for
     // it. Without this the only way to find out that `impeccable` takes
-    // twenty-two actions was to copy it and get `/impeccable` on its own. It
-    // trails the strip rather than sitting against the name, so kind, scope and
-    // agents keep the same x on every row whether or not this chip is drawn.
+    // twenty-two actions was to copy it and get `/impeccable` on its own.
+    //
+    // It rides in the name column's own slack, starting where that row's name
+    // actually ends. Trailing the agents strip instead put it in the one place
+    // on the row that has no room: everything left of the strip is a fixed
+    // column and everything right of it is right-anchored to the edge, so the
+    // chip had 28 pixels to be 70 pixels wide and drew straight over the token
+    // figure. The name column is where the spare width on this row lives -- the
+    // longest name here is 23 characters against a column that takes about 37 --
+    // and a chip that says what this skill's invocation offers belongs beside
+    // its name anyway.
+    //
+    // The margin is capped so the chip stops at the column's edge rather than
+    // running under `kind`: a long name pushes it right until it cannot go
+    // further, and a wrapped one leaves it parked at the end.
     Rectangle {
       id: argChip
-      anchors.left: strip.right
-      anchors.leftMargin: Style.spacing.md
+      anchors.left: nameText.left
+      anchors.leftMargin: Math.min(nameText.contentWidth + Style.spacing.md,
+                                   root.colName - width)
       anchors.top: parent.top
       anchors.topMargin: Math.round((er.lineHeight - height) / 2)
       visible: er.argOptions.length > 0
@@ -4986,68 +4999,137 @@ Panel {
 
         // What was counted. Wraps rather than eliding, so the last number is
         // never the one that gets cut.
-        Flow {
+        //
+        // Opposite them, how the list is grouped. ^G cycles it and the footer
+        // says so, which is worth nothing to someone who came here with a mouse:
+        // the only way to find out the list could be grouped by agent was to
+        // read a key hint and try it. Four boxes name the choices and take one
+        // click to any of them.
+        //
+        // They sat beside the agent chips until there were five of those rather
+        // than three, at which point the width this switch was taking off the end
+        // of that line was exactly the width the last two agents needed, and Pi
+        // and Codex wrapped onto a line of their own. This line has the room the
+        // other one ran out of.
+        Item {
           width: parent.width
-          visible: root.loaded && root.countChips.length > 0
-          spacing: Style.spacing.sm
+          visible: root.loaded
+          implicitHeight: Math.max(countFlow.implicitHeight, groupSwitch.height)
 
-          Repeater {
-            model: root.countChips
+          Flow {
+            id: countFlow
+            anchors.left: parent.left
+            anchors.right: groupSwitch.left
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.countChips.length > 0
+            spacing: Style.spacing.sm
 
-            Rectangle {
-              id: countChip
-              required property var modelData
-              readonly property bool urgent: countChip.modelData.urgent
-              readonly property bool on: countChip.modelData.kind === "attention"
-                ? root.attentionOnly : root.kindFilter === countChip.modelData.kind
+            Repeater {
+              model: root.countChips
 
-              width: countChipRow.implicitWidth + Style.space(18)
-              height: Style.space(24)
-              radius: Style.cornerRadius
-              color: {
-                var base = countChip.urgent ? Color.urgent : root.fg
-                if (countChip.on) return Util.alpha(countChip.urgent ? Color.urgent : root.hue, 0.30)
-                if (countHover.hovered) return Util.alpha(base, 0.16)
-                return Util.alpha(base, countChip.urgent ? 0.14 : 0.07)
-              }
+              Rectangle {
+                id: countChip
+                required property var modelData
+                readonly property bool urgent: countChip.modelData.urgent
+                readonly property bool on: countChip.modelData.kind === "attention"
+                  ? root.attentionOnly : root.kindFilter === countChip.modelData.kind
 
-              Row {
-                id: countChipRow
-                anchors.centerIn: parent
-                spacing: Style.spacing.sm
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: String(countChip.modelData.n)
-                  color: countChip.urgent ? Color.urgent : root.fg
-                  font.family: root.face
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+                width: countChipRow.implicitWidth + Style.space(18)
+                height: Style.space(24)
+                radius: Style.cornerRadius
+                color: {
+                  var base = countChip.urgent ? Color.urgent : root.fg
+                  if (countChip.on) return Util.alpha(countChip.urgent ? Color.urgent : root.hue, 0.30)
+                  if (countHover.hovered) return Util.alpha(base, 0.16)
+                  return Util.alpha(base, countChip.urgent ? 0.14 : 0.07)
                 }
 
+                Row {
+                  id: countChipRow
+                  anchors.centerIn: parent
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: String(countChip.modelData.n)
+                    color: countChip.urgent ? Color.urgent : root.fg
+                    font.family: root.face
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: countChip.modelData.what
+                    color: countChip.urgent ? Color.urgent
+                      : (countChip.on || countHover.hovered ? root.readable : root.soft)
+                    font.family: root.face
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                HoverHandler { id: countHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler {
+                  // Clicking the one already on turns it off, the same gesture as
+                  // the shelf chips below. "need attention" is not a kind, so it
+                  // drives the attention filter rather than the kind filter.
+                  onTapped: {
+                    if (countChip.modelData.kind === "attention")
+                      root.attentionOnly = !root.attentionOnly
+                    else
+                      root.kindFilter = countChip.on ? "" : String(countChip.modelData.kind)
+                    root.selectedIndex = 0
+                  }
+                }
+              }
+            }
+        }
+
+          Row {
+            id: groupSwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.xs
+            height: Style.space(24)
+            // Filter by all three dimensions at once and the only grouping left
+            // is the flat list you are already looking at. One box that cannot
+            // be pressed is not a switch.
+            visible: root.groupModes.length > 1
+
+            Repeater {
+              model: root.groupModes
+
+              Rectangle {
+                id: modeChip
+                required property var modelData
+                readonly property bool on: root.grouping === modeChip.modelData.key
+
+                anchors.verticalCenter: parent.verticalCenter
+                width: modeText.implicitWidth + Style.space(16)
+                height: Style.space(22)
+                radius: Style.cornerRadius
+                color: modeChip.on ? Util.alpha(root.hue, 0.30)
+                  : (modeHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07))
+
                 Text {
-                  anchors.verticalCenter: parent.verticalCenter
+                  id: modeText
+                  anchors.centerIn: parent
                   textFormat: Text.PlainText
-                  text: countChip.modelData.what
-                  color: countChip.urgent ? Color.urgent
-                    : (countChip.on || countHover.hovered ? root.readable : root.soft)
+                  text: modeChip.modelData.label
+                  color: modeChip.on ? root.fg : (modeHover.hovered ? root.readable : root.soft)
                   font.family: root.face
                   font.pixelSize: Style.font.caption
                 }
-              }
 
-              HoverHandler { id: countHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler {
-                // Clicking the one already on turns it off, the same gesture as
-                // the shelf chips below. "need attention" is not a kind, so it
-                // drives the attention filter rather than the kind filter.
-                onTapped: {
-                  if (countChip.modelData.kind === "attention")
-                    root.attentionOnly = !root.attentionOnly
-                  else
-                    root.kindFilter = countChip.on ? "" : String(countChip.modelData.kind)
-                  root.selectedIndex = 0
+                HoverHandler { id: modeHover; cursorShape: Qt.PointingHandCursor }
+                // No toggle-off. Every one of these is a grouping, "none"
+                // included, so there is no state for clicking the current one to
+                // return to.
+                TapHandler {
+                  onTapped: if (!modeChip.on) root.setGrouping(String(modeChip.modelData.key))
                 }
               }
             }
@@ -5057,30 +5139,37 @@ Panel {
         // What it costs, per agent, with that agent's mark and how many of the
         // rows above it can see. Its own row, because it answers a different
         // question from the one above and the two were competing for the same
-        // line.
+        // line -- and now it is the whole of that row, the grouping switch having
+        // moved up to the counts.
         //
-        // Opposite them, how the list is grouped. ^G cycles it and the footer
-        // says so, which is worth nothing to someone who came here with a mouse:
-        // the only way to find out the list could be grouped by agent was to
-        // read a key hint and try it. Four boxes name the choices and take one
-        // click to any of them, and they sit on this line rather than a line of
-        // their own because this line was half empty and a panel is not obliged
-        // to spend a row on a control that fits beside one.
-        Item {
-          width: parent.width
-          visible: root.loaded
-          implicitHeight: Math.max(toolFlow.implicitHeight, groupSwitch.height)
-
+        // The chips share the width rather than leaving it at the end. Each keeps
+        // the width its own label needs and takes an equal share of what is left
+        // over, so the row reads as one band across the panel instead of five
+        // boxes and a margin. Only while they fit on one line: a narrower panel,
+        // another agent or a filter that changes the roster puts the slack back
+        // at zero and the Flow wraps as it always did.
         Flow {
           id: toolFlow
-          anchors.left: parent.left
-          anchors.right: groupSwitch.left
-          anchors.rightMargin: Style.spacing.lg
-          anchors.verticalCenter: parent.verticalCenter
-          visible: root.toolChips.length > 0
+          width: parent.width
+          visible: root.loaded && root.toolChips.length > 0
           spacing: Style.spacing.sm
 
+          readonly property real naturalContentWidth: {
+            var total = 0
+            for (var i = 0; i < chipRepeater.count; i++) {
+              var it = chipRepeater.itemAt(i)
+              if (it) total += it.implicitWidth
+            }
+            return total + Math.max(0, chipRepeater.count - 1) * toolFlow.spacing
+          }
+          readonly property bool fitsOneLine:
+            chipRepeater.count > 0 && toolFlow.naturalContentWidth <= toolFlow.width
+          readonly property real stretchPerChip: toolFlow.fitsOneLine
+            ? Math.max(0, (toolFlow.width - toolFlow.naturalContentWidth) / chipRepeater.count)
+            : 0
+
           Repeater {
+            id: chipRepeater
             model: root.toolChips
 
             Rectangle {
@@ -5088,7 +5177,8 @@ Panel {
               required property var modelData
               readonly property bool on: root.toolFilter === toolChip.modelData.tool
 
-              width: toolChipRow.implicitWidth + Style.space(18)
+              implicitWidth: toolChipRow.implicitWidth + Style.space(18)
+              width: toolChip.implicitWidth + toolFlow.stretchPerChip
               height: Style.space(24)
               radius: Style.cornerRadius
               color: Util.alpha(toolChip.modelData.colour,
@@ -5140,54 +5230,6 @@ Panel {
                 onTapped: {
                   root.toolFilter = toolChip.on ? "" : String(toolChip.modelData.tool)
                   root.selectedIndex = 0
-                }
-              }
-            }
-          }
-        }
-
-          Row {
-            id: groupSwitch
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.xs
-            height: Style.space(24)
-            // Filter by all three dimensions at once and the only grouping left
-            // is the flat list you are already looking at. One box that cannot
-            // be pressed is not a switch.
-            visible: root.groupModes.length > 1
-
-            Repeater {
-              model: root.groupModes
-
-              Rectangle {
-                id: modeChip
-                required property var modelData
-                readonly property bool on: root.grouping === modeChip.modelData.key
-
-                anchors.verticalCenter: parent.verticalCenter
-                width: modeText.implicitWidth + Style.space(16)
-                height: Style.space(22)
-                radius: Style.cornerRadius
-                color: modeChip.on ? Util.alpha(root.hue, 0.30)
-                  : (modeHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07))
-
-                Text {
-                  id: modeText
-                  anchors.centerIn: parent
-                  textFormat: Text.PlainText
-                  text: modeChip.modelData.label
-                  color: modeChip.on ? root.fg : (modeHover.hovered ? root.readable : root.soft)
-                  font.family: root.face
-                  font.pixelSize: Style.font.caption
-                }
-
-                HoverHandler { id: modeHover; cursorShape: Qt.PointingHandCursor }
-                // No toggle-off. Every one of these is a grouping, "none"
-                // included, so there is no state for clicking the current one to
-                // return to.
-                TapHandler {
-                  onTapped: if (!modeChip.on) root.setGrouping(String(modeChip.modelData.key))
                 }
               }
             }
