@@ -30,7 +30,7 @@ import stat
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "1.0.0"
 HOME = os.path.expanduser("~")
 
 # A skill's SKILL.md is prose. Anything larger than this is not a skill, it is a
@@ -141,14 +141,107 @@ def read_text(path: str, *, max_bytes: int = MAX_READ, why: list | None = None) 
     return raw.decode("utf-8", "replace")
 
 
-def read_json(path: str) -> tuple[dict | list | None, str | None]:
-    """Returns (value, error). A malformed config is a finding, not a crash."""
-    why: list[str] = []
-    txt = read_text(path, why=why)
-    if txt is None:
-        return None, (f"refused, {why[0]}" if why else None)
-    if not txt.strip():
-        return None, "empty"
+# A comment in a JSON config is not everywhere a mistake. OpenCode documents
+# `~/.config/opencode/opencode.jsonc` beside the plain `.json` and reads either
+# with the same parser, so a comment there is something the agent itself
+# accepted -- and calling it `invalid json` would report a fault about a file
+# OpenCode loaded without complaint, which is the one kind of wrong this panel
+# must not be: a claim the reader cannot go and check.
+#
+# Only the formats that document comments get this. Claude Code's settings.json
+# stays strict, because nothing here has measured Claude accepting a comment in
+# it; guessing that it does would invent a state no agent reports.
+def strip_jsonc(text: str) -> str:
+    """Blank out // and /* */ comments and any trailing comma, string-aware.
+
+    Knowing where a string is, is the whole difficulty. The first line of nearly
+    every OpenCode config is `"$schema": "https://opencode.ai/config.json"`, and
+    a stripper that does not know it is inside a string eats from the `//`
+    onwards and turns a valid document into a truncated one.
+
+    Every byte removed is replaced by a space, and every newline inside a block
+    comment is kept, so the text handed to the parser is the same length and
+    shape as the file. A finding that names line 14 then means line 14 of the
+    file somebody is about to open, rather than line 14 of a string only this
+    program ever saw.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            out.append(ch)
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            # An unterminated block comment runs to the end of the file, which is
+            # what the permissive parsers do. Strict JSON has already refused this
+            # text by the time we are here, so there is no better reading to keep.
+            close = text.find("*/", i + 2)
+            end = n if close < 0 else close + 2
+            out.append("".join("\n" if text[k] == "\n" else " " for k in range(i, end)))
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return _drop_trailing_commas("".join(out))
+
+
+def _drop_trailing_commas(text: str) -> str:
+    """The other half of JSONC: a comma before the closing brace or bracket.
+
+    Blanked in place rather than deleted, for the same reason the comments are:
+    the parser's line and column have to keep pointing into the real file.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    in_string = False
+    comma = -1
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            comma = -1
+        elif ch == ",":
+            comma = i
+        elif ch in "}]":
+            if comma >= 0:
+                out[comma] = " "
+            comma = -1
+        elif not ch.isspace():
+            comma = -1
+        i += 1
+    return "".join(out)
+
+
+def _parse_json(txt: str) -> tuple[dict | list | None, str | None]:
     try:
         return json.loads(txt), None
     except json.JSONDecodeError as exc:
@@ -159,6 +252,38 @@ def read_json(path: str) -> tuple[dict | list | None, str | None]:
         return None, "json nested too deeply"
     except (ValueError, MemoryError) as exc:
         return None, f"unreadable json: {type(exc).__name__}"
+
+
+def parse_jsonc_text(txt: str) -> tuple[dict | list | None, str | None]:
+    """Strict JSON first; the comment stripper only where strict already failed.
+
+    Strict's answer is the one that stands, so a plain JSON file is never put
+    through the stripper at all and cannot be changed by it.
+
+    Where both fail it is the STRIPPED message that is reported, which is the
+    opposite of what it looks like it should be. Strict fails on the first `//`
+    it meets, and in a file whose format documents comments that line is not the
+    fault -- sending somebody to line 1 to look at a comment they wrote on
+    purpose is worse than saying nothing. The stripper blanks bytes in place and
+    keeps every newline, so a line counted in stripped text is the same line in
+    the file, and it is the one with the real fault on it.
+    """
+    value, err = _parse_json(txt)
+    if err is None:
+        return value, None
+    stripped, second = _parse_json(strip_jsonc(txt))
+    return (stripped, None) if second is None else (None, second)
+
+
+def read_json(path: str, *, jsonc: bool = False) -> tuple[dict | list | None, str | None]:
+    """Returns (value, error). A malformed config is a finding, not a crash."""
+    why: list[str] = []
+    txt = read_text(path, why=why)
+    if txt is None:
+        return None, (f"refused, {why[0]}" if why else None)
+    if not txt.strip():
+        return None, "empty"
+    return parse_jsonc_text(txt) if jsonc else _parse_json(txt)
 
 
 def read_toml(path: str) -> tuple[dict | None, str | None]:
@@ -858,6 +983,144 @@ def tags_for(name: str, description: str) -> list[str]:
 
 # ------------------------------------------------------------------- roots
 
+# ------------------------------------------------------ where OpenCode looks
+#
+# `~/.config/opencode` is the answer on most machines and on none of the
+# interesting ones. Four environment variables move or add to it, and they do
+# not do the same thing as each other -- measured against opencode 1.18.30 with
+# a marker skill in a scratch directory and `opencode debug skill`:
+#
+#   XDG_CONFIG_HOME=X        MOVES the config directory to X/opencode, and the
+#                            skills root moves with it. ~/.config/opencode/skills
+#                            stops being read at all: 17 skills became 0.
+#   OPENCODE_CONFIG_DIR=D    ADDS D/skills as a further root. The default one is
+#                            still read; both showed up in the same listing.
+#   OPENCODE_CONFIG=file     An ADDITIONAL config file, merged in. It does not
+#                            replace the global one -- opencode's own help says
+#                            "load an additional explicit config".
+#   OPENCODE_CONFIG_CONTENT  Inline JSON, merged last, "as a final local-scope
+#                            merge".
+#
+# Reading the hardcoded path instead was not a cosmetic error. Under
+# XDG_CONFIG_HOME the panel counted a directory OpenCode had stopped reading and
+# missed the one it had started on, so every OpenCode figure on the bar -- the
+# always-on token total this widget exists to print -- was computed from the
+# wrong disk.
+OPENCODE_CONFIG_NAMES = ("opencode.jsonc", "opencode.json")
+
+
+def opencode_config_dir() -> str:
+    """OpenCode's global config directory. A relative XDG_CONFIG_HOME is ignored,
+    which is what the spec says to do and what opencode itself does."""
+    xdg = os.environ.get("XDG_CONFIG_HOME") or ""
+    base = xdg if xdg.startswith("/") else os.path.join(HOME, ".config")
+    return os.path.join(base, "opencode")
+
+
+def _xdg_dir(variable: str, fallback: str, leaf: str = "opencode") -> str:
+    """One XDG base directory, resolved the way opencode resolves it.
+
+    The same measurement as the config directory, run against the other two:
+    XDG_CACHE_HOME moves `cache` and XDG_DATA_HOME moves `data`, so the fetched
+    skills root and the MCP token file follow them. Both were hardcoded here,
+    and both are read for figures the panel prints as facts.
+    """
+    base = os.environ.get(variable) or ""
+    return os.path.join(base if base.startswith("/") else os.path.join(HOME, fallback), leaf)
+
+
+def opencode_cache_dir() -> str:
+    return _xdg_dir("XDG_CACHE_HOME", ".cache")
+
+
+def opencode_data_dir() -> str:
+    return _xdg_dir("XDG_DATA_HOME", ".local/share")
+
+
+def opencode_extra_config_dir() -> str | None:
+    """The directory OPENCODE_CONFIG_DIR adds, where it names one we do not have."""
+    extra = os.environ.get("OPENCODE_CONFIG_DIR") or ""
+    if not extra.startswith("/"):
+        return None
+    extra = extra.rstrip("/")
+    return None if extra == opencode_config_dir().rstrip("/") else extra
+
+
+def opencode_config_path(directory: str | None = None) -> str:
+    """Which of the two global config files OpenCode actually loads.
+
+    Measured: with `opencode.jsonc` and `opencode.json` both present in one
+    directory, the `.jsonc` wins and the plain one is never read. This panel
+    prints a file beside every state it reports, so naming the shadowed one
+    would send somebody to edit a file their agent ignores.
+
+    `lexists` rather than `exists`, because a dangling symlink is still a file
+    OpenCode will try: the honest answer is to name it and let `safe_read`
+    refuse it out loud, not to skip past it as though it were absent.
+    """
+    directory = opencode_config_dir() if directory is None else directory
+    for name in OPENCODE_CONFIG_NAMES:
+        candidate = os.path.join(directory, name)
+        if os.path.lexists(candidate):
+            return candidate
+    return os.path.join(directory, OPENCODE_CONFIG_NAMES[-1])
+
+
+def _merge_config(base: dict, extra: dict) -> dict:
+    """One level deeper than `update`, because `mcp` is the key we read and two
+    sources each declaring a server must end with both rather than the last."""
+    out = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            merged = dict(out[key])
+            merged.update(value)
+            out[key] = merged
+        else:
+            out[key] = value
+    return out
+
+
+def read_opencode_config(findings: list | None = None) -> dict:
+    """Every source OpenCode merges into its global config, in the order it does.
+
+    Reading only the first of them was how a server declared in any of the other
+    two went missing from a panel whose whole claim is that it lists everything
+    three agents load.
+    """
+    directory = opencode_config_dir()
+    live = opencode_config_path(directory)
+    for name in OPENCODE_CONFIG_NAMES:
+        other = os.path.join(directory, name)
+        if other != live and os.path.lexists(other) and findings is not None:
+            findings.append({"what": tilde(other),
+                             "detail": f"not read: {os.path.basename(live)} beside it wins"})
+    merged: dict = {}
+    value, err = read_json(live, jsonc=True)
+    if err and findings is not None:
+        findings.append({"what": tilde(live), "detail": err})
+    merged = _merge_config(merged, as_dict(value))
+
+    explicit = os.environ.get("OPENCODE_CONFIG") or ""
+    if explicit.startswith("/"):
+        value, err = read_json(explicit, jsonc=True)
+        if err and findings is not None:
+            findings.append({"what": tilde(explicit), "detail": f"OPENCODE_CONFIG: {err}"})
+        merged = _merge_config(merged, as_dict(value))
+
+    inline = os.environ.get("OPENCODE_CONFIG_CONTENT") or ""
+    if inline.strip():
+        if len(inline) > MAX_READ:
+            if findings is not None:
+                findings.append({"what": "OPENCODE_CONFIG_CONTENT",
+                                 "detail": f"larger than {MAX_READ // (1024 * 1024)} MiB, not read"})
+        else:
+            value, err = parse_jsonc_text(inline)
+            if err and findings is not None:
+                findings.append({"what": "OPENCODE_CONFIG_CONTENT", "detail": err})
+            merged = _merge_config(merged, as_dict(value))
+    return merged
+
+
 def skill_roots() -> list[dict]:
     """Every directory the three agents look in, and which of them look there.
 
@@ -875,15 +1138,50 @@ def skill_roots() -> list[dict]:
     print.
     """
     oc_external = not os.environ.get("OPENCODE_DISABLE_EXTERNAL_SKILLS")
-    claude_tools = ["claude"] + (["opencode"] if oc_external else [])
-    agents_tools = ["codex"] + (["opencode"] if oc_external else [])
-    return [
+    # Cursor is the greediest reader on the machine. Its own bundle names nine
+    # skill directories outright, four of them belonging to other agents -- read
+    # out of /opt/cursor-agent/1931.index.js, `./src/utils/skill-path-utils.ts`:
+    #
+    #   [".cursor/skills/", ".cursor/skills-cursor/", ".cursor/cloud-skills/",
+    #    ".cursor/plugins/", ".claude/skills/", ".claude/plugins/",
+    #    ".codex/skills/", ".grok/skills/", ".agents/skills/"]
+    #
+    # So installing Cursor does not add a column of its own findings: it lights up
+    # rows that are already here. Pi is the opposite and reads nobody else's --
+    # its binary has no reference to .claude/skills or .agents/skills at all.
+    oc = ["opencode"] if oc_external else []
+    claude_tools = ["claude", "cursor"] + oc
+    agents_tools = ["codex", "cursor"] + oc
+    roots = [
         {"path": f"{HOME}/.claude/skills", "tools": claude_tools, "scope": "user"},
-        {"path": f"{HOME}/.config/opencode/skills", "tools": ["opencode"], "scope": "user"},
-        {"path": f"{HOME}/.codex/skills", "tools": ["codex"], "scope": "user"},
+        {"path": os.path.join(opencode_config_dir(), "skills"),
+         "tools": ["opencode"], "scope": "user"},
+        {"path": f"{HOME}/.codex/skills", "tools": ["codex", "cursor"], "scope": "user"},
         {"path": f"{HOME}/.agents/skills", "tools": agents_tools, "scope": "shared"},
-        {"path": f"{HOME}/.cache/opencode/skills", "tools": ["opencode"], "scope": "fetched"},
-    ] + plugin_skill_roots()
+        {"path": os.path.join(opencode_cache_dir(), "skills"),
+         "tools": ["opencode"], "scope": "fetched"},
+        # Pi keeps its agent under ~/.pi/agent, and the directory name is settled
+        # in the binary as `CONFIG_DIR_NAME = pkg.piConfig?.configDir || ".pi"` --
+        # a build-time value, not an environment one, so nothing relocates it.
+        {"path": f"{HOME}/.pi/agent/skills", "tools": ["pi"], "scope": "user"},
+        {"path": f"{HOME}/.cursor/skills", "tools": ["cursor"], "scope": "user"},
+        # Cursor ships its own and records them in
+        # .cursor-managed-skills-manifest.json under `builtinSkillIds`. They are on
+        # disk rather than in the binary, so unlike Claude's they can be counted --
+        # and the scope says who put them there.
+        {"path": f"{HOME}/.cursor/skills-cursor", "tools": ["cursor"], "scope": "bundled"},
+        {"path": f"{HOME}/.cursor/cloud-skills", "tools": ["cursor"], "scope": "fetched"},
+        {"path": f"{HOME}/.grok/skills", "tools": ["cursor"], "scope": "user"},
+    ]
+    # Added rather than substituted, which is the half of this that is easy to
+    # get backwards: OPENCODE_CONFIG_DIR gives OpenCode a second place to look
+    # and takes nothing away, so both roots were in the same listing when it
+    # was measured.
+    extra = opencode_extra_config_dir()
+    if extra:
+        roots.append({"path": os.path.join(extra, "skills"),
+                      "tools": ["opencode"], "scope": "user"})
+    return roots + plugin_skill_roots()
 
 
 def plugin_skill_roots() -> list[dict]:
@@ -1281,9 +1579,16 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
         # A plugin's skill is addressed through its plugin: Claude Code calls it
         # `/impeccable:impeccable`, not `/impeccable`. Getting this wrong hands
         # the user a command their agent does not have.
+        # Five agents, five spellings, and only Claude Code keys by the directory.
+        # Pi's is the odd one: `/skill:` then the declared name, taken from its own
+        # binary, where the string is built as skill:${skill.name}. Cursor takes a
+        # bare `/${e.name}`. Copying the wrong one is silent -- the agent simply has
+        # no such command -- which is why each is written from the identity that
+        # agent actually reads rather than from one shared id.
         "invocation": ({"claude": f"/{root['plugin']}:{dir_name}"} if root.get("plugin")
                        else {"claude": f"/{dir_name}",
-                             "opencode": f"/{display}", "codex": f"${display}"}),
+                             "opencode": f"/{display}", "codex": f"${display}",
+                             "pi": f"/skill:{display}", "cursor": f"/{display}"}),
         "argumentHint": clip(str(fm.get("argument-hint") or ""), 400) or None,
         "argumentChoices": parse_argument_hint(fm.get("argument-hint")),
         # `chars` is the length the estimate was taken from, published because the
@@ -1400,10 +1705,22 @@ def _skill_state(dir_name, declared_name, tools, overrides, bundled):
         # a plugin and not OpenCode -- so claiming this is writable would promise a
         # switch that only exists on machines running somebody else's add-on.
         state["opencode"] = {"value": "allow", "writable": False,
-                             "file": tilde(f"{HOME}/.config/opencode/opencode.json")}
+                             "file": tilde(opencode_config_path())}
     if "codex" in tools:
         state["codex"] = {"value": "enabled", "writable": not bundled, "needsRestart": True,
                           "file": tilde(f"{HOME}/.codex/config.toml")}
+    if "pi" in tools:
+        # Pi keeps a `skills` array in its own settings file. Read-only here for the
+        # same reason every other switch is: this version reports state and changes
+        # none of it.
+        state["pi"] = {"value": "enabled", "writable": False,
+                       "file": tilde(f"{HOME}/.pi/agent/settings.json")}
+    if "cursor" in tools:
+        # Cursor has nowhere to write this. It ships no per-skill enable key, which
+        # is why the one manager that does write configs refuses the operation
+        # outright rather than inventing a file -- so the honest row says the state
+        # and names no file at all.
+        state["cursor"] = {"value": "enabled", "writable": False, "file": None}
     return state
 
 
@@ -1424,9 +1741,7 @@ def _catalog_categories() -> dict:
 def scan_mcp(findings: list[dict]) -> list[dict]:
     servers: list[dict] = []
 
-    oc, err = read_json(f"{HOME}/.config/opencode/opencode.json")
-    if err:
-        findings.append({"what": "opencode.json", "detail": err})
+    oc = read_opencode_config(findings)
     for name, cfg in as_dict(as_dict(oc).get("mcp")).items():
         cfg = as_dict(cfg)
         servers.append({
@@ -1475,7 +1790,7 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
 
 
 def _opencode_auth(name: str) -> str:
-    data, _ = read_json(f"{HOME}/.local/share/opencode/mcp-auth.json")
+    data, _ = read_json(os.path.join(opencode_data_dir(), "mcp-auth.json"))
     entry = as_dict(as_dict(data).get(name))
     if not entry:
         return "unknown"

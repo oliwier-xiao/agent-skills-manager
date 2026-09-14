@@ -5,6 +5,18 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
+// Delegates get their own bound component context rather than the enclosing
+// object's, which is what Qt 6.5 onwards recommends and what makes this file
+// statically checkable: without it qmllint cannot see that the `root` a delegate
+// names is this document's root, and reports all 274 of those as unqualified
+// access -- 379 warnings that say nothing, drowning the ones that do.
+//
+// It is not free, and the cost is the point. Under Bound a delegate no longer
+// inherits `modelData` and `index` from its context: it must declare them
+// `required`, and one that does not silently draws nothing. qmllint names every
+// such site, which is how the eleven below were found rather than reported.
+pragma ComponentBehavior: Bound
+
 // The panel: one grouped, searchable list of every skill, MCP server and Claude
 // Code plugin the three agents load. bin/agent-skills does all the I/O and prints
 // one line of JSON; this file reads it and draws it, and the only process it
@@ -97,12 +109,34 @@ Panel {
   //
   // Named here, every width is one number in one place, and moving a column
   // moves the heading and the total with it.
+  //
+  // Kind, scope and agents read left to right from a fixed name column now,
+  // rather than right to left from the edge: the name is what you are scanning
+  // for, so what kind of thing this is and which agents can see it belong right
+  // beside it. Tokens, used and flag stay right-anchored, because they are
+  // numbers and a number's place is the edge you total it against. What used to
+  // be elastic name space is now the gap between the two halves.
   readonly property int colFlag: Style.space(18)
   readonly property int colUsed: Style.space(40)
   readonly property int colTokens: root.showTokens ? Style.space(46) : 0
-  readonly property int colAgents: Style.space(15) * 3 + Style.spacing.xs * 2
+  readonly property int colAgents: Style.space(15) * 5 + Style.spacing.xs * 4
   readonly property int colScope: Style.space(52)
   readonly property int colKind: Style.space(48)
+  // Fixed for the same reason colKind and colScope are: a column that moves
+  // with its own content is not a column.
+  //
+  // The panel is a fixed 720 wide and everything on a row adds up to less, so
+  // some slack exists whatever is done with it; the only question is where it
+  // sits. At 190 it sat between the agents strip and the tokens figure, and 158
+  // pixels of nothing in the middle of a row reads as a fault rather than as
+  // separation -- the eye crosses it looking for the column that went missing.
+  // Spent on the name instead, the same pixels are trailing space inside a
+  // left-aligned column, which is what every table does and reads as room. What
+  // is left between the two halves is a separator you can see and not a hole.
+  //
+  // wrapMode and maximumLineCount on the name are this width's overflow valve
+  // for a name longer than it, not the normal case.
+  readonly property int colName: Style.space(300)
 
   // `g` cycles this for the session; the setting owns the default.
   property string groupOverride: ""
@@ -420,8 +454,15 @@ Panel {
   // allowed not to follow the desktop theme, because a Claude mark that turned
   // green under a green theme would be saying something untrue. Everything the
   // panel says in its own voice still follows it.
+  //
+  // Pi and Cursor have no such colour to carry -- both ship monochrome by their
+  // own choice -- so these two are grays instead: distinguishable from each
+  // other and from the three real brand colours above, and from nothing else.
+  // AgentMark.qml owns the same pair for the same reason, in the file that owns
+  // what a tool looks like.
   readonly property var markColours: ({
-    claude: "#D97757", opencode: "#5C9CF5", codex: "#10A37F"
+    claude: "#D97757", opencode: "#5C9CF5", codex: "#10A37F",
+    pi: "#C9C9C9", cursor: "#8A8A8A"
   })
   function markColour(tool) {
     return root.markColours[tool] || root.fg
@@ -440,7 +481,8 @@ Panel {
     unsorted: "Unsorted"
   })
   readonly property var toolLabel: ({
-    claude: "Claude Code", opencode: "OpenCode", codex: "Codex"
+    claude: "Claude Code", opencode: "OpenCode", codex: "Codex",
+    pi: "Pi", cursor: "Cursor"
   })
 
   // The codes bin/agent-skills can attach, ranked. Only 2 and above light the urgent
@@ -958,8 +1000,8 @@ Panel {
   // does not.
 
   function normalise(v) {
-    // OpenCode and Codex have no per-skill switch the helper can read, so it
-    // reports fixed "allow" and "enabled" for them. Both mean on.
+    // OpenCode, Codex and Cursor have no per-skill switch the helper can read,
+    // so it reports fixed "allow" and "enabled" for them. Both mean on.
     if (v === "allow" || v === "enabled" || v === "on") return "on"
     return v
   }
@@ -969,9 +1011,9 @@ Panel {
   }
 
   // Agent ids as the names this panel calls them by, in one string. The helper
-  // writes claude, opencode and codex; every other row here has already been
-  // through the same translation, and a list of agents is read rather than
-  // matched on, so it is joined once at the boundary.
+  // writes claude, opencode, codex, pi and cursor; every other row here has
+  // already been through the same translation, and a list of agents is read
+  // rather than matched on, so it is joined once at the boundary.
   function toolNames(list) {
     if (!list || typeof list.length !== "number") return ""
     var out = []
@@ -998,7 +1040,7 @@ Panel {
 
     var state = item.state || ({})
     var switches = []
-    var order = ["claude", "opencode", "codex"]
+    var order = ["claude", "opencode", "codex", "pi", "cursor"]
     for (var s = 0; s < order.length; s++) {
       var st = state[order[s]]
       if (!st) continue
@@ -1117,7 +1159,9 @@ Panel {
       tools: {
         claude: state.claude ? root.normalise(state.claude.value) : null,
         opencode: state.opencode ? root.normalise(state.opencode.value) : null,
-        codex: state.codex ? root.normalise(state.codex.value) : null
+        codex: state.codex ? root.normalise(state.codex.value) : null,
+        pi: state.pi ? root.normalise(state.pi.value) : null,
+        cursor: state.cursor ? root.normalise(state.cursor.value) : null
       },
       toolList: tools,
       tokens: root.showTokens ? (Number(item.tokens && item.tokens.alwaysOn) || 0) : null,
@@ -1182,7 +1226,7 @@ Panel {
   }
 
   function mcpView(entry) {
-    var tools = { claude: null, opencode: null, codex: null }
+    var tools = { claude: null, opencode: null, codex: null, pi: null, cursor: null }
     var live = entry.enabled === null || entry.enabled === undefined
       ? "unknown" : (entry.enabled ? "on" : "off")
     if (tools.hasOwnProperty(entry.tool)) tools[entry.tool] = live
@@ -1236,7 +1280,8 @@ Panel {
       name: name,
       badge: "PLUGIN",
       scope: root.clean(entry.scope, 16),
-      tools: { claude: entry.enabled === false ? "off" : "on", opencode: null, codex: null },
+      tools: { claude: entry.enabled === false ? "off" : "on",
+               opencode: null, codex: null, pi: null, cursor: null },
       toolList: ["claude"],
       tokens: null,
       usage: "-",
@@ -1337,7 +1382,7 @@ Panel {
         if (buckets["cat:" + cats[c]]) keys.push("cat:" + cats[c])
       if (buckets["cat:_servers"]) keys.push("cat:_servers")
     } else if (mode === "Tool") {
-      var to = ["tool:claude", "tool:opencode", "tool:codex"]
+      var to = ["tool:claude", "tool:opencode", "tool:codex", "tool:pi", "tool:cursor"]
       for (var k = 0; k < to.length; k++) if (buckets[to[k]]) keys.push(to[k])
     } else if (mode === "Kind") {
       var ko = ["kind:skill", "kind:mcp", "kind:plugin"]
@@ -1522,7 +1567,7 @@ Panel {
     if (!root.loaded) return out
     var query = root.fold(root.filterText.trim())
     var src = root.catalogue
-    var order = ["claude", "opencode", "codex"]
+    var order = ["claude", "opencode", "codex", "pi", "cursor"]
     var per = ({})
     var seen = ({})
     for (var i = 0; i < src.length; i++) {
@@ -3022,7 +3067,10 @@ Panel {
     // a scroll starts fighting itself.
     property real visibleBottom: 0
 
-    implicitHeight: er.lineHeight + (er.expanded ? detail.implicitHeight + Style.spacing.xl : 0)
+    // nameText carries its own overflow height for a wrapped two-line name; a
+    // single-line row measures the same lineHeight it always has, so this adds
+    // nothing beyond what the name itself already grew by.
+    implicitHeight: nameText.height + (er.expanded ? detail.implicitHeight + Style.spacing.xl : 0)
 
     // The height used to snap and the content used to fade into the space that
     // had already appeared, which reads as two separate events for one action.
@@ -3040,7 +3088,7 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
-      height: er.expanded ? er.height : er.lineHeight
+      height: er.expanded ? er.height : nameText.height
       foreground: root.fg
       accent: root.hue
       hasCursor: er.hasCursor
@@ -3056,7 +3104,7 @@ Panel {
       anchors.top: parent.top
       anchors.topMargin: Style.space(5)
       width: Style.space(3)
-      height: er.lineHeight - Style.space(10)
+      height: nameText.height - Style.space(10)
       radius: width / 2
       color: root.categoryColourFor(er.view.category)
     }
@@ -3077,13 +3125,54 @@ Panel {
       font.pixelSize: Style.font.body
     }
 
-    // A skill that documents alternatives says how many, on the line, before you
-    // reach for it. Without this the only way to find out that `impeccable` takes
+    Text {
+      id: nameText
+      anchors.left: rowGlyph.right
+      anchors.leftMargin: Style.spacing.md
+      anchors.top: parent.top
+      width: root.colName
+      // Never shorter than one line even before contentHeight has measured, and
+      // never shorter than the wrapped content once it has -- so a single-line
+      // row keeps exactly the height it always had, and a wrapped one grows by
+      // only as much as its second line needs.
+      height: Math.max(er.lineHeight, contentHeight)
+      verticalAlignment: Text.AlignVCenter
+      textFormat: Text.PlainText
+      text: er.view.name
+      color: root.fg
+      font.family: root.face
+      // One step above every other string on the row. It was `body`, the same
+      // size as the glyph beside it and only two above the metadata, so the row
+      // had no primary role -- just a brighter one.
+      font.pixelSize: Style.font.subtitle
+      font.bold: er.expanded
+      wrapMode: Text.Wrap
+      maximumLineCount: 2
+      elide: Text.ElideRight
+    }
+
+    // A skill that documents alternatives says how many, before you reach for
+    // it. Without this the only way to find out that `impeccable` takes
     // twenty-two actions was to copy it and get `/impeccable` on its own.
+    //
+    // It rides in the name column's own slack, starting where that row's name
+    // actually ends. Trailing the agents strip instead put it in the one place
+    // on the row that has no room: everything left of the strip is a fixed
+    // column and everything right of it is right-anchored to the edge, so the
+    // chip had 28 pixels to be 70 pixels wide and drew straight over the token
+    // figure. The name column is where the spare width on this row lives -- the
+    // longest name here is 23 characters against a column that takes about 37 --
+    // and a chip that says what this skill's invocation offers belongs beside
+    // its name anyway.
+    //
+    // The margin is capped so the chip stops at the column's edge rather than
+    // running under `kind`: a long name pushes it right until it cannot go
+    // further, and a wrapped one leaves it parked at the end.
     Rectangle {
       id: argChip
-      anchors.right: badge.left
-      anchors.rightMargin: Style.spacing.md
+      anchors.left: nameText.left
+      anchors.leftMargin: Math.min(nameText.contentWidth + Style.spacing.md,
+                                   root.colName - width)
       anchors.top: parent.top
       anchors.topMargin: Math.round((er.lineHeight - height) / 2)
       visible: er.argOptions.length > 0
@@ -3103,32 +3192,14 @@ Panel {
       }
     }
 
-    Text {
-      anchors.left: rowGlyph.right
-      anchors.leftMargin: Style.spacing.md
-      anchors.right: argChip.left
-      anchors.rightMargin: er.argOptions.length > 0 ? Style.spacing.md : Style.spacing.lg
-      anchors.top: parent.top
-      height: er.lineHeight
-      verticalAlignment: Text.AlignVCenter
-      textFormat: Text.PlainText
-      text: er.view.name
-      color: root.fg
-      font.family: root.face
-      // One step above every other string on the row. It was `body`, the same
-      // size as the glyph beside it and only two above the metadata, so the row
-      // had no primary role -- just a brighter one.
-      font.pixelSize: Style.font.subtitle
-      font.bold: er.expanded
-      elide: Text.ElideRight
-    }
-
     // The accent is spent on the tool strip, so the type badge takes a neutral
-    // fill and does not compete with it.
+    // fill and does not compete with it. Left-anchored off the name now, along
+    // with scope and the strip after it, so the three of them start at the same
+    // x on every row regardless of how long that row's name is.
     Rectangle {
       id: badge
-      anchors.right: scope.left
-      anchors.rightMargin: Style.spacing.md
+      anchors.left: nameText.right
+      anchors.leftMargin: Style.spacing.lg
       anchors.top: parent.top
       anchors.topMargin: Math.round((er.lineHeight - height) / 2)
       width: root.colKind
@@ -3149,8 +3220,8 @@ Panel {
 
     Text {
       id: scope
-      anchors.right: strip.left
-      anchors.rightMargin: Style.spacing.lg
+      anchors.left: badge.right
+      anchors.leftMargin: Style.spacing.md
       anchors.top: parent.top
       height: er.lineHeight
       width: root.colScope
@@ -3166,21 +3237,25 @@ Panel {
 
     // The tool strip is the on/off column. On and off here are properties of a
     // (thing, tool) pair -- this machine has skills Claude loads and Codex does
-    // not -- so one binary column would have to lie about two of the three. Three
+    // not -- so one binary column would have to lie about four of the five. Five
     // cells are always drawn, in a fixed order at a fixed width, so the column
     // reads down the list as a shape rather than as text. One hue at graded
     // strength: a palette would read as unrelated kinds rather than as one
     // control at four settings.
+    //
+    // Left-anchored off scope, the last of the three fixed columns that now
+    // start at the name's edge -- whatever comes after (the actions chip, then
+    // the reclaimed gap) starts wherever this row's own icons end.
     Row {
       id: strip
-      anchors.right: tokens.left
-      anchors.rightMargin: Style.spacing.lg
+      anchors.left: scope.right
+      anchors.leftMargin: Style.spacing.lg
       anchors.top: parent.top
       height: er.lineHeight
       spacing: Style.spacing.xs
 
       Repeater {
-        model: ["claude", "opencode", "codex"]
+        model: ["claude", "opencode", "codex", "pi", "cursor"]
 
         delegate: Item {
           id: cell
@@ -3197,7 +3272,7 @@ Panel {
             size: Style.space(12)
             // The tool's own colour when it has the thing, and plain foreground
             // when it does not. Colour therefore means "loaded here" rather than
-            // decorating a row three times over.
+            // decorating a row five times over.
             color: cell.toolState === "on" || cell.toolState === "name-only"
                    || cell.toolState === "user-invocable-only"
               ? root.markColour(cell.modelData) : root.fg
@@ -3283,7 +3358,7 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
-      height: er.lineHeight
+      height: nameText.height
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: er.entered()
@@ -3297,7 +3372,7 @@ Panel {
       anchors.right: parent.right
       anchors.rightMargin: Style.spacing.md
       anchors.top: parent.top
-      anchors.topMargin: er.lineHeight
+      anchors.topMargin: nameText.height
       active: er.expanded
       opacity: er.expanded ? 1 : 0
 
@@ -3549,6 +3624,7 @@ Panel {
             Repeater {
               model: er.view.switches
               delegate: Item {
+                id: switchRow
                 required property var modelData
                 width: parent.width
                 height: Style.space(15)
@@ -3557,7 +3633,7 @@ Panel {
                   anchors.left: parent.left
                   width: Style.space(86)
                   textFormat: Text.PlainText
-                  text: modelData.tool
+                  text: switchRow.modelData.tool
                   color: root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.caption
@@ -3569,8 +3645,8 @@ Panel {
                   anchors.leftMargin: Style.space(90)
                   width: Style.space(120)
                   textFormat: Text.PlainText
-                  text: modelData.value
-                  color: modelData.value === "off" ? root.soft : root.fg
+                  text: switchRow.modelData.value
+                  color: switchRow.modelData.value === "off" ? root.soft : root.fg
                   font.family: root.face
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
@@ -3581,7 +3657,7 @@ Panel {
                   anchors.leftMargin: Style.space(214)
                   anchors.right: parent.right
                   textFormat: Text.PlainText
-                  text: modelData.file
+                  text: switchRow.modelData.file
                   color: root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.caption
@@ -3604,7 +3680,7 @@ Panel {
                 width: parent.width
                 height: Style.space(17)
 
-                readonly property bool openable: String(modelData.abs || "").charAt(0) === "/"
+                readonly property bool openable: String(mountRow.modelData.abs || "").charAt(0) === "/"
 
                 // A path on screen that you cannot get to is a riddle. Clicking it
                 // opens the directory in whatever the desktop uses for one.
@@ -3630,7 +3706,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   width: Style.space(86)
                   textFormat: Text.PlainText
-                  text: modelData.tool
+                  text: mountRow.modelData.tool
                   color: root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.caption
@@ -3644,7 +3720,7 @@ Panel {
                   anchors.rightMargin: Style.spacing.md
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: modelData.path
+                  text: mountRow.modelData.path
                   color: mountHover.hovered && mountRow.openable ? root.fg : root.readable
                   font.family: root.face
                   font.pixelSize: Style.font.caption
@@ -3656,8 +3732,8 @@ Panel {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: modelData.link
-                  color: modelData.link === "symlink" ? root.hue : root.soft
+                  text: mountRow.modelData.link
+                  color: mountRow.modelData.link === "symlink" ? root.hue : root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.caption
                 }
@@ -3795,6 +3871,7 @@ Panel {
             Repeater {
               model: er.view.invocations
               delegate: Rectangle {
+                id: invChip
                 required property var modelData
                 required property int index
                 // Only the first invocation opens the picker, because that is the
@@ -3805,23 +3882,23 @@ Panel {
                 width: invText.implicitWidth + Style.space(14)
                 height: Style.space(20)
                 radius: height / 2
-                color: invHover.hovered && modelData.ok
+                color: invHover.hovered && invChip.modelData.ok
                   ? Style.hoverFillFor(root.fg, root.hue) : Util.alpha(root.fg, 0.10)
 
                 Text {
                   id: invText
                   anchors.centerIn: parent
                   textFormat: Text.PlainText
-                  text: modelData.text + (parent.picks ? " \u2026" : "")
-                  color: modelData.ok ? root.fg : root.soft
+                  text: invChip.modelData.text + (invChip.picks ? " \u2026" : "")
+                  color: invChip.modelData.ok ? root.fg : root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.bodySmall
                 }
 
                 HoverHandler { id: invHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler {
-                  onTapped: modelData.ok
-                    ? er.copyRequested(modelData.text)
+                  onTapped: invChip.modelData.ok
+                    ? er.copyRequested(invChip.modelData.text)
                     : root.flash("That invocation has characters a prompt would not take safely")
                 }
               }
@@ -3864,11 +3941,11 @@ Panel {
                 // at all, so it must not keep drawing the control that dismissed
                 // it, and no other fact here is anybody's to switch off.
                 readonly property bool dismissable:
-                  modelData.dismissable === true && modelData.value !== ""
+                  factRow.modelData.dismissable === true && factRow.modelData.value !== ""
                 width: parent.width
-                height: modelData.value === "" && !factRow.carriesControls
+                height: factRow.modelData.value === "" && !factRow.carriesControls
                   ? 0 : Style.space(14)
-                visible: modelData.value !== "" || factRow.carriesControls
+                visible: factRow.modelData.value !== "" || factRow.carriesControls
 
                 // This row's band in the card's own coordinates, and whether the
                 // chips are standing over it. Every fact asks, rather than the
@@ -3903,7 +3980,7 @@ Panel {
                   // row on the card where the two columns stopped lining up.
                   anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
-                  text: modelData.label
+                  text: factRow.modelData.label
                   color: root.soft
                   font.family: root.face
                   font.pixelSize: Style.font.caption
@@ -3940,7 +4017,7 @@ Panel {
                                     valueRow.width - (dismiss.visible
                                       ? dismiss.width + valueRow.spacing : 0))
                     textFormat: Text.PlainText
-                    text: modelData.value
+                    text: factRow.modelData.value
                     color: root.soft
                     font.family: root.face
                     font.pixelSize: Style.font.caption
@@ -4752,10 +4829,21 @@ Panel {
         // panel is for, and three rows of filter on a machine with fifteen
         // categories takes more than it gives. So it is one row until you say
         // otherwise, and it stays open once you have.
+        // The strip outlives its chips, because `all` lives in it and `all` is the
+        // only thing on screen that undoes a filter. Categories belong to skills
+        // alone, so filtering to servers or to plugins empties this row -- and
+        // hiding the row on that count took the way out with it. Two clicks, kind
+        // then attention, and the panel had nothing left to click: Escape still
+        // worked and the footer still said so, but a filter you can set with the
+        // mouse and only clear with the keyboard is a trap, and it springs exactly
+        // when the list has gone quiet enough to look broken.
+        //
+        // So: visible while there are shelves to pick from, and visible while
+        // there is anything to undo. Both false and it is gone as before.
         Item {
           id: filterStrip
           width: parent.width
-          visible: root.categoryChips.length > 0
+          visible: root.categoryChips.length > 0 || root.anyChipFilter
           height: visible ? (root.filtersExpanded ? catFlow.implicitHeight
                                                   : catFlow.rowHeight) : 0
           clip: true
@@ -4920,103 +5008,40 @@ Panel {
           }
         }
 
-        // What was counted. Wraps rather than eliding, so the last number is
-        // never the one that gets cut.
-        Flow {
-          width: parent.width
-          visible: root.loaded && root.countChips.length > 0
-          spacing: Style.spacing.sm
-
-          Repeater {
-            model: root.countChips
-
-            Rectangle {
-              id: countChip
-              required property var modelData
-              readonly property bool urgent: countChip.modelData.urgent
-              readonly property bool on: countChip.modelData.kind === "attention"
-                ? root.attentionOnly : root.kindFilter === countChip.modelData.kind
-
-              width: countChipRow.implicitWidth + Style.space(18)
-              height: Style.space(24)
-              radius: Style.cornerRadius
-              color: {
-                var base = countChip.urgent ? Color.urgent : root.fg
-                if (countChip.on) return Util.alpha(countChip.urgent ? Color.urgent : root.hue, 0.30)
-                if (countHover.hovered) return Util.alpha(base, 0.16)
-                return Util.alpha(base, countChip.urgent ? 0.14 : 0.07)
-              }
-
-              Row {
-                id: countChipRow
-                anchors.centerIn: parent
-                spacing: Style.spacing.sm
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: String(countChip.modelData.n)
-                  color: countChip.urgent ? Color.urgent : root.fg
-                  font.family: root.face
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: countChip.modelData.what
-                  color: countChip.urgent ? Color.urgent
-                    : (countChip.on || countHover.hovered ? root.readable : root.soft)
-                  font.family: root.face
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
-              HoverHandler { id: countHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler {
-                // Clicking the one already on turns it off, the same gesture as
-                // the shelf chips below. "need attention" is not a kind, so it
-                // drives the attention filter rather than the kind filter.
-                onTapped: {
-                  if (countChip.modelData.kind === "attention")
-                    root.attentionOnly = !root.attentionOnly
-                  else
-                    root.kindFilter = countChip.on ? "" : String(countChip.modelData.kind)
-                  root.selectedIndex = 0
-                }
-              }
-            }
-          }
-        }
-
         // What it costs, per agent, with that agent's mark and how many of the
         // rows above it can see. Its own row, because it answers a different
-        // question from the one above and the two were competing for the same
-        // line.
+        // question from the one below and the two were competing for the same
+        // line -- and now it is the whole of that row, the grouping switch having
+        // moved down to the counts.
         //
-        // Opposite them, how the list is grouped. ^G cycles it and the footer
-        // says so, which is worth nothing to someone who came here with a mouse:
-        // the only way to find out the list could be grouped by agent was to
-        // read a key hint and try it. Four boxes name the choices and take one
-        // click to any of them, and they sit on this line rather than a line of
-        // their own because this line was half empty and a panel is not obliged
-        // to spend a row on a control that fits beside one.
-        Item {
-          width: parent.width
-          visible: root.loaded
-          implicitHeight: Math.max(toolFlow.implicitHeight, groupSwitch.height)
-
+        // The chips share the width rather than leaving it at the end. Each keeps
+        // the width its own label needs and takes an equal share of what is left
+        // over, so the row reads as one band across the panel instead of five
+        // boxes and a margin. Only while they fit on one line: a narrower panel,
+        // another agent or a filter that changes the roster puts the slack back
+        // at zero and the Flow wraps as it always did.
         Flow {
           id: toolFlow
-          anchors.left: parent.left
-          anchors.right: groupSwitch.left
-          anchors.rightMargin: Style.spacing.lg
-          anchors.verticalCenter: parent.verticalCenter
-          visible: root.toolChips.length > 0
+          width: parent.width
+          visible: root.loaded && root.toolChips.length > 0
           spacing: Style.spacing.sm
 
+          readonly property real naturalContentWidth: {
+            var total = 0
+            for (var i = 0; i < chipRepeater.count; i++) {
+              var it = chipRepeater.itemAt(i)
+              if (it) total += it.implicitWidth
+            }
+            return total + Math.max(0, chipRepeater.count - 1) * toolFlow.spacing
+          }
+          readonly property bool fitsOneLine:
+            chipRepeater.count > 0 && toolFlow.naturalContentWidth <= toolFlow.width
+          readonly property real stretchPerChip: toolFlow.fitsOneLine
+            ? Math.max(0, (toolFlow.width - toolFlow.naturalContentWidth) / chipRepeater.count)
+            : 0
+
           Repeater {
+            id: chipRepeater
             model: root.toolChips
 
             Rectangle {
@@ -5024,7 +5049,8 @@ Panel {
               required property var modelData
               readonly property bool on: root.toolFilter === toolChip.modelData.tool
 
-              width: toolChipRow.implicitWidth + Style.space(18)
+              implicitWidth: toolChipRow.implicitWidth + Style.space(18)
+              width: toolChip.implicitWidth + toolFlow.stretchPerChip
               height: Style.space(24)
               radius: Style.cornerRadius
               color: Util.alpha(toolChip.modelData.colour,
@@ -5080,6 +5106,97 @@ Panel {
               }
             }
           }
+        }
+
+        // What was counted. Wraps rather than eliding, so the last number is
+        // never the one that gets cut.
+        //
+        // Opposite them, how the list is grouped. ^G cycles it and the footer
+        // says so, which is worth nothing to someone who came here with a mouse:
+        // the only way to find out the list could be grouped by agent was to
+        // read a key hint and try it. Four boxes name the choices and take one
+        // click to any of them.
+        //
+        // They sat beside the agent chips until there were five of those rather
+        // than three, at which point the width this switch was taking off the end
+        // of that line was exactly the width the last two agents needed, and Pi
+        // and Codex wrapped onto a line of their own. This line has the room the
+        // other one ran out of.
+        Item {
+          width: parent.width
+          visible: root.loaded
+          implicitHeight: Math.max(countFlow.implicitHeight, groupSwitch.height)
+
+          Flow {
+            id: countFlow
+            anchors.left: parent.left
+            anchors.right: groupSwitch.left
+            anchors.rightMargin: Style.spacing.lg
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.countChips.length > 0
+            spacing: Style.spacing.sm
+
+            Repeater {
+              model: root.countChips
+
+              Rectangle {
+                id: countChip
+                required property var modelData
+                readonly property bool urgent: countChip.modelData.urgent
+                readonly property bool on: countChip.modelData.kind === "attention"
+                  ? root.attentionOnly : root.kindFilter === countChip.modelData.kind
+
+                width: countChipRow.implicitWidth + Style.space(18)
+                height: Style.space(24)
+                radius: Style.cornerRadius
+                color: {
+                  var base = countChip.urgent ? Color.urgent : root.fg
+                  if (countChip.on) return Util.alpha(countChip.urgent ? Color.urgent : root.hue, 0.30)
+                  if (countHover.hovered) return Util.alpha(base, 0.16)
+                  return Util.alpha(base, countChip.urgent ? 0.14 : 0.07)
+                }
+
+                Row {
+                  id: countChipRow
+                  anchors.centerIn: parent
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: String(countChip.modelData.n)
+                    color: countChip.urgent ? Color.urgent : root.fg
+                    font.family: root.face
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: countChip.modelData.what
+                    color: countChip.urgent ? Color.urgent
+                      : (countChip.on || countHover.hovered ? root.readable : root.soft)
+                    font.family: root.face
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                HoverHandler { id: countHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler {
+                  // Clicking the one already on turns it off, the same gesture as
+                  // the shelf chips below. "need attention" is not a kind, so it
+                  // drives the attention filter rather than the kind filter.
+                  onTapped: {
+                    if (countChip.modelData.kind === "attention")
+                      root.attentionOnly = !root.attentionOnly
+                    else
+                      root.kindFilter = countChip.on ? "" : String(countChip.modelData.kind)
+                    root.selectedIndex = 0
+                  }
+                }
+              }
+            }
         }
 
           Row {
@@ -5205,7 +5322,7 @@ Panel {
         // what it was. The token figure was guessable from the tilde; the count
         // beside it -- how many times Claude Code records you having used that
         // skill -- was guessable by nobody, and neither was the difference
-        // between the scope word and the three marks next to it.
+        // between the scope word and the five marks next to it.
         //
         // One heading row, above the whole list rather than repeated inside each
         // group, because the group headers sum two of these columns and are laid
@@ -5215,19 +5332,24 @@ Panel {
         //
         // Every width here is root's column grid, the same one the row and the
         // group header read, so a heading cannot come to stand over a column it
-        // does not name.
+        // does not name. Kind, scope and agents read left off the name heading
+        // here for the same reason they read left off nameText on the row: the
+        // two chains have to move together or a heading stops sitting over what
+        // it names.
         Item {
           width: parent.width
           visible: root.rows.length > 0
           height: visible ? Style.space(15) : 0
 
           Text {
+            id: legendName
             anchors.left: parent.left
             // Where a row's name starts: past the shelf bar, the gap, the kind
             // glyph and its gap.
             anchors.leftMargin: Style.space(2) + Style.space(3) + Style.spacing.lg
                                 + Style.space(16) + Style.spacing.md
             anchors.verticalCenter: parent.verticalCenter
+            width: root.colName
             textFormat: Text.PlainText
             text: "name"
             color: root.soft
@@ -5238,8 +5360,8 @@ Panel {
 
           Text {
             id: legendKind
-            anchors.right: legendScope.left
-            anchors.rightMargin: Style.spacing.md
+            anchors.left: legendName.right
+            anchors.leftMargin: Style.spacing.lg
             anchors.verticalCenter: parent.verticalCenter
             width: root.colKind
             horizontalAlignment: Text.AlignHCenter
@@ -5253,8 +5375,8 @@ Panel {
 
           Text {
             id: legendScope
-            anchors.right: legendAgents.left
-            anchors.rightMargin: Style.spacing.lg
+            anchors.left: legendKind.right
+            anchors.leftMargin: Style.spacing.md
             anchors.verticalCenter: parent.verticalCenter
             width: root.colScope
             horizontalAlignment: Text.AlignRight
@@ -5268,8 +5390,8 @@ Panel {
 
           Text {
             id: legendAgents
-            anchors.right: legendTokens.left
-            anchors.rightMargin: Style.spacing.lg
+            anchors.left: legendScope.right
+            anchors.leftMargin: Style.spacing.lg
             anchors.verticalCenter: parent.verticalCenter
             width: root.colAgents
             horizontalAlignment: Text.AlignHCenter

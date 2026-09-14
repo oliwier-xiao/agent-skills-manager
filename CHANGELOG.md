@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.0
+
+Five agents instead of three, and four config paths that were being read from the
+wrong place.
+
+**Cursor and Pi join the inventory.** Cursor's own bundle names nine skill
+directories, four of which belong to other agents — `~/.claude/skills`,
+`~/.claude/plugins`, `~/.codex/skills` and `~/.agents/skills` — so installing it
+does not add a column of its own findings, it lights up rows that were already on
+the list. Pi is the opposite and reads nobody else's, keeping its own under
+`~/.pi/agent/skills`. Each invocation is written from the identity that agent
+actually reads, because copying the wrong one is silent: Pi takes
+`/skill:<declared name>`, Cursor a bare `/<declared name>`. Both marks are the
+products' real ones.
+
+**OpenCode's paths are resolved rather than assumed.** They were hardcoded to
+`~/.config/opencode`, and four things move them: `XDG_CONFIG_HOME` **moves** the
+config root and the skills root with it, `OPENCODE_CONFIG_DIR` **adds** a second,
+`OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` each merge a further
+configuration in, and `XDG_CACHE_HOME` and `XDG_DATA_HOME` move the fetched-skills
+root and the MCP token file. Under any of them the always-on token figure on the
+bar was computed from the wrong disk.
+
+**`opencode.jsonc` is read as OpenCode reads it** — comments and all, and it wins
+over an `opencode.json` beside it, which is now reported as shadowed rather than
+quietly used instead. Strict JSON is still parsed first and its answer stands, so
+a plain config is never put through the comment stripper at all.
+
+**The row was rebuilt.** `kind`, `scope` and `agents` come off the right-hand
+chain and follow a fixed name column, so they start at the same place on every
+row; a long name wraps to two lines and then elides, and the row grows only when
+it does. The actions chip rides in the name column's own slack. The agent band
+spans the full width above the counts, and the grouping switch moved up beside
+them — five agents needed the width the switch had been taking.
+
+**`all` no longer disappears when you need it.** Categories belong to skills
+alone, so filtering to servers emptied the shelf row and took the only control
+that clears a filter with it. It now stays for as long as there is something to
+undo.
+
+**The QML gate stopped measuring the wrong thing.** Quickshell exposes its config
+root as the module `qs`, which `qmllint` does not know, so every Omarchy type read
+as missing: 388 unqualified-access warnings that do not exist, and 209
+missing-property findings hidden behind them. With the module resolved and
+`pragma ComponentBehavior: Bound` in place, `Panel.qml` reports 220 warnings
+against 831, none of them unqualified access, and CI holds a per-file ceiling.
+
 ## 0.2.0
 
 Categories can now be ordered, not just filled. The category index grew a

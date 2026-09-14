@@ -53,6 +53,18 @@ fail() { printf '%sFAIL%s  %-44s %s\n' "$R" "$Z" "$1" "${2-}"; printf 'FAIL\n' >
 warn() { printf '%sWARN%s  %-44s %s\n' "$Y" "$Z" "$1" "${2-}"; printf 'WARN\n' >>"$TALLY"; }
 soft() { if [ "$STRICT" -eq 1 ]; then fail "$@"; else warn "$@"; fi; }
 
+# The qmllint warning ceiling per file. Each number is what the file scores today
+# with qs.* resolving, and every one of them is Omarchy's `readonly property
+# QtObject` tokens reported as missing properties. Lower one whenever a real
+# finding is fixed; raising one is the thing this is here to make deliberate.
+qml_budget() {
+  case "$1" in
+    Panel.qml)     printf '%s' 222 ;;
+    BarWidget.qml) printf '%s' 16 ;;
+    *)             printf '%s' 0 ;;
+  esac
+}
+
 # The marketplace reads the pushed git TREE, never the worktree.
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git ls-files >"$FILES"
@@ -670,8 +682,8 @@ EOF
 # signatures, so it calls `function open(): void` a syntax error in a file Qt6 accepts.
 # Only a Qt6 binary is worth believing. Gate on its exit status, which is the one
 # signal the journald redirection cannot swallow: Qt6 exits non-zero on an error and
-# zero on warnings, so the unresolved qs.* imports on a machine without Quickshell
-# installed stay warnings and no allowlist is needed to keep the gate usable.
+# zero on warnings. On a runner without Quickshell the qs.* imports cannot resolve at
+# all, so the warning count there is meaningless and only the exit status is read.
 QLINT=""
 if [ -x /usr/lib/qt6/bin/qmllint ]; then
   QLINT=/usr/lib/qt6/bin/qmllint
@@ -679,8 +691,21 @@ elif command -v qmllint >/dev/null 2>&1 \
   && qmllint --version 2>&1 | grep -qE 'qmllint ([6-9]|[1-9][0-9])\.'; then
   QLINT="$(command -v qmllint)"
 fi
+# Quickshell exposes its configuration root as the module `qs`, so `import qs.Ui`
+# resolves to <root>/Ui. qmllint knows no such rule: pointed straight at the shell
+# directory it fails to import qs.Ui and qs.Commons, and every Omarchy type in the
+# document then reads as missing. That is not a quieter gate, it is a WRONG one in
+# both directions -- measured on Panel.qml, the unresolved types invented 388
+# unqualified-access warnings that do not exist and hid 209 missing-property
+# findings behind them, 831 reported against 601 real. One symlink named `qs` in
+# the scratch directory is the whole difference between measuring the document and
+# measuring the import failure.
 QINC=""
-[ -d /usr/share/omarchy/shell ] && QINC="-I /usr/share/omarchy/shell"
+if [ -d /usr/share/omarchy/shell ]; then
+  mkdir -p "$WORK/imports"
+  ln -sfn /usr/share/omarchy/shell "$WORK/imports/qs"
+  QINC="-I $WORK/imports"
+fi
 if [ "$QML_N" -eq 0 ]; then
   warn "qml/present" "no .qml file in the tree yet"
 elif [ -z "$QLINT" ]; then
@@ -694,29 +719,55 @@ else
   # are written that way on purpose and both run, so the cycle qmllint sees is an
   # artifact of resolving qs.Ui here, not a defect, and giving it up costs the gate
   # nothing it was asked to find: whether the document itself compiles.
+  mapfile -t QFILES <<<"$QML_LIST"
   mkdir -p "$WORK/qml"; QB="$WORK/qml/Subject.qml"
-  while IFS= read -r q; do
+  for q in "${QFILES[@]}"; do
     [ -n "$q" ] && [ -f "$q" ] || continue
+    # Every OTHER .qml in the tree goes in beside the subject, so a type this
+    # document uses from its own repository resolves -- Panel.qml draws AgentMark,
+    # and without this that read as a missing type and took its anchors with it.
+    # The subject itself is left out and copied under a neutral name, which is the
+    # cycle described above: a QML file is implicitly a component named after
+    # itself, so Panel.qml, whose root element is the imported Panel, resolves that
+    # name back to itself and 6.11.2 never comes back from a document this size.
+    rm -f "$WORK"/qml/*.qml
+    for s in "${QFILES[@]}"; do
+      [ -n "$s" ] && [ -f "$s" ] && [ "$s" != "$q" ] && cp "$s" "$WORK/qml/$(basename "$s")"
+    done
     cp "$q" "$QB"
     # A file that wedges the parser anyway must not wedge CI with it, and a run that
     # never finished is an unread verdict rather than a broken document, so it warns.
-    timeout 60 "$QLINT" $QINC "$QB" >"$WORK/qmllint" 2>&1; QRC=$?
+    timeout 120 "$QLINT" $QINC -I "$WORK/qml" "$QB" >"$WORK/qmllint" 2>&1; QRC=$?
     QN="$(grep -c '^Warning:' "$WORK/qmllint" || true)"
-    if [ "$QRC" -eq 0 ]; then
-      pass "qml/qmllint $q" "compiles; ${QN:-0} warning(s)"
-    elif [ "$QRC" -eq 124 ]; then
-      warn "qml/qmllint $q" "qmllint did not finish within 60s -- verdict unknown"
-    else
+    if [ "$QRC" -ne 0 ] && [ "$QRC" -ne 124 ]; then
       # Qt6 prints its diagnostics on stdout, so quoting the first one names the defect.
       # A build that routed them elsewhere would leave the line blank, and a FAIL with no
       # reason on it is the same unread verdict as a grep that never matches, so fall
       # back to the exit status -- the signal that arrives either way.
       QMSG="$(grep -m1 -E '^(Warning|Error):' "$WORK/qmllint" | sed "s|$QB|$q|")"
       fail "qml/qmllint $q" "${QMSG:-exit $QRC}"
+      continue
     fi
-  done <<EOF
-$QML_LIST
-EOF
+    if [ "$QRC" -eq 124 ]; then
+      warn "qml/qmllint $q" "qmllint did not finish within 120s -- verdict unknown"
+      continue
+    fi
+    # A budget rather than zero, because zero is not reachable from here. What is
+    # left on a clean tree is Omarchy's own typing: Style.font and Style.spacing are
+    # declared `readonly property QtObject`, so qmllint cannot see `.caption` or
+    # `.md` on them and reports a missing property at every use. Nothing in this
+    # repository can retype another package's singletons. The ceiling is the only
+    # thing a count is still good for once zero is out of reach -- it stops the
+    # number drifting upward one careless binding at a time.
+    QMAX="$(qml_budget "$q")"
+    if [ -z "$QINC" ]; then
+      pass "qml/qmllint $q" "compiles; warnings unmeasurable without Quickshell"
+    elif [ "${QN:-0}" -le "$QMAX" ]; then
+      pass "qml/qmllint $q" "compiles; ${QN:-0}/${QMAX} warning(s)"
+    else
+      fail "qml/qmllint $q" "${QN:-0} warnings, budget ${QMAX} -- $(grep -m1 '^Warning:' "$WORK/qmllint" | sed "s|$QB|$q|")"
+    fi
+  done
 fi
 if command -v omarchy-plugin-validate >/dev/null 2>&1; then
   if omarchy-plugin-validate . >/dev/null 2>"$WORK/opv"; then

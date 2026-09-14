@@ -28,6 +28,34 @@ def load():
 ax = load()
 
 
+# A throwaway HOME is only throwaway once the environment agrees with it.
+# Omarchy sets XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_DATA_HOME on every
+# desktop session, and OpenCode resolves its config file, its skills root and
+# its MCP token file through those rather than through $HOME. Patching ax.HOME
+# alone therefore left the scan walking this machine's real directories, which
+# is how a test asserting an EMPTY home came back holding sixteen n8n skills.
+REDIRECTING_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT")
+
+
+@contextlib.contextmanager
+def env_without_redirects(**overrides):
+    """Clear every variable that can move a root out of HOME, then set any given."""
+    saved = {k: os.environ.get(k) for k in set(REDIRECTING_VARS) | set(overrides)}
+    for k in REDIRECTING_VARS:
+        os.environ.pop(k, None)
+    for k, v in overrides.items():
+        os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def scan_with_home(build):
     """Run a whole scan against a throwaway HOME the caller has just filled.
 
@@ -43,7 +71,8 @@ def scan_with_home(build):
         try:
             ax.HOME = d
             ax.STORE_PATH = os.path.join(d, "categories.json")
-            return ax.scan()
+            with env_without_redirects():
+                return ax.scan()
         finally:
             ax.HOME, ax.STORE_PATH = saved_home, saved_store
     finally:
@@ -376,6 +405,213 @@ class Roots(unittest.TestCase):
     def test_claude_never_reads_the_shared_agents_dir(self):
         shared = next(r for r in ax.skill_roots() if r["path"].endswith(".agents/skills"))
         self.assertNotIn("claude", shared["tools"])
+
+
+class StripJsonc(unittest.TestCase):
+    def test_the_schema_url_is_not_a_comment(self):
+        """The first line of nearly every OpenCode config, and the case that
+        makes a naive stripper eat the rest of the document."""
+        text = '{"$schema": "https://opencode.ai/config.json"}'
+        self.assertEqual(json.loads(ax.strip_jsonc(text))["$schema"],
+                         "https://opencode.ai/config.json")
+
+    def test_a_line_comment_goes(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{\n// gone\n"a": 1\n}')), {"a": 1})
+
+    def test_a_block_comment_goes(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{/* gone */"a": 1}')), {"a": 1})
+
+    def test_an_unterminated_block_comment_runs_to_the_end(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{"a": 1}\n/* never closed')), {"a": 1})
+
+    def test_a_trailing_comma_in_an_object_goes(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{"a": 1,}')), {"a": 1})
+
+    def test_a_trailing_comma_in_an_array_goes(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{"a": [1, 2,]}')), {"a": [1, 2]})
+
+    def test_a_comma_that_is_not_trailing_stays(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{"a": 1, "b": 2}')), {"a": 1, "b": 2})
+
+    def test_an_escaped_quote_does_not_end_the_string(self):
+        text = r'{"a": "he said \" // not a comment"}'
+        self.assertEqual(json.loads(ax.strip_jsonc(text))["a"], 'he said " // not a comment')
+
+    def test_a_comment_marker_inside_a_string_stays(self):
+        self.assertEqual(json.loads(ax.strip_jsonc('{"a": "/* kept */"}'))["a"], "/* kept */")
+
+    def test_the_text_keeps_its_length_so_line_numbers_survive(self):
+        """A finding names a line for somebody to go and open. Stripping bytes
+        rather than blanking them would name a line of text only this program
+        ever saw."""
+        text = '{\n// a comment\n"a": 1,\n/* two\nlines */\n"b": 2\n}'
+        stripped = ax.strip_jsonc(text)
+        self.assertEqual(len(stripped), len(text))
+        self.assertEqual(stripped.count("\n"), text.count("\n"))
+
+
+class JsoncReads(unittest.TestCase):
+    def write(self, text, name="opencode.jsonc"):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_plain_json_is_never_put_through_the_stripper(self):
+        path = self.write('{"a": "//b"}')
+        self.assertEqual(ax.read_json(path, jsonc=True), ({"a": "//b"}, None))
+
+    def test_a_comment_is_read_only_where_the_format_documents_one(self):
+        path = self.write('// hello\n{"a": 1}')
+        self.assertEqual(ax.read_json(path, jsonc=True), ({"a": 1}, None))
+        self.assertEqual(ax.read_json(path)[0], None)
+
+    def test_a_file_that_is_broken_either_way_reports_the_strict_fault(self):
+        """The stripper only ever removes comments, so a document that fails
+        both ways failed for a reason strict JSON already named."""
+        value, err = ax.read_json(self.write('// c\n{"a": }'), jsonc=True)
+        self.assertIsNone(value)
+        self.assertIn("line 2", err)
+
+
+class OpenCodeDirectories(unittest.TestCase):
+    """Measured against opencode 1.18.30 with a marker skill and `debug skill`."""
+
+    def setUp(self):
+        self.addCleanup(setattr, ax, "HOME", ax.HOME)
+        ax.HOME = "/home/probe"
+
+    def test_the_default_is_the_one_almost_everybody_has(self):
+        with env_without_redirects():
+            self.assertEqual(ax.opencode_config_dir(), "/home/probe/.config/opencode")
+
+    def test_xdg_config_home_moves_the_directory(self):
+        with env_without_redirects(XDG_CONFIG_HOME="/elsewhere"):
+            self.assertEqual(ax.opencode_config_dir(), "/elsewhere/opencode")
+
+    def test_a_relative_xdg_config_home_is_ignored(self):
+        with env_without_redirects(XDG_CONFIG_HOME="relative/path"):
+            self.assertEqual(ax.opencode_config_dir(), "/home/probe/.config/opencode")
+
+    def test_the_cache_and_data_directories_follow_their_own_variables(self):
+        with env_without_redirects(XDG_CACHE_HOME="/c", XDG_DATA_HOME="/d"):
+            self.assertEqual(ax.opencode_cache_dir(), "/c/opencode")
+            self.assertEqual(ax.opencode_data_dir(), "/d/opencode")
+
+    def test_a_config_dir_that_names_the_default_adds_no_second_root(self):
+        with env_without_redirects(OPENCODE_CONFIG_DIR="/home/probe/.config/opencode/"):
+            self.assertIsNone(ax.opencode_extra_config_dir())
+
+    def test_a_config_dir_elsewhere_is_an_extra_root(self):
+        with env_without_redirects(OPENCODE_CONFIG_DIR="/scratch"):
+            self.assertEqual(ax.opencode_extra_config_dir(), "/scratch")
+
+
+class OpenCodeRoots(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, ax, "HOME", ax.HOME)
+        ax.HOME = "/home/probe"
+
+    def paths(self):
+        return [r["path"] for r in ax.skill_roots()]
+
+    def test_xdg_moves_the_root_and_takes_the_old_one_away(self):
+        """The measurement: ~/.config/opencode/skills went from seventeen skills
+        to nought the moment XDG_CONFIG_HOME named somewhere else."""
+        with env_without_redirects(XDG_CONFIG_HOME="/elsewhere"):
+            paths = self.paths()
+        self.assertIn("/elsewhere/opencode/skills", paths)
+        self.assertNotIn("/home/probe/.config/opencode/skills", paths)
+
+    def test_the_config_dir_variable_adds_a_root_and_takes_none_away(self):
+        with env_without_redirects(OPENCODE_CONFIG_DIR="/scratch"):
+            paths = self.paths()
+        self.assertIn("/scratch/skills", paths)
+        self.assertIn("/home/probe/.config/opencode/skills", paths)
+
+    def test_the_fetched_root_follows_the_cache_variable(self):
+        with env_without_redirects(XDG_CACHE_HOME="/c"):
+            paths = self.paths()
+        self.assertIn("/c/opencode/skills", paths)
+        self.assertNotIn("/home/probe/.cache/opencode/skills", paths)
+
+
+class OpenCodeConfigFile(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.addCleanup(setattr, ax, "HOME", ax.HOME)
+        ax.HOME = self.home
+        self.dir = os.path.join(self.home, ".config", "opencode")
+        os.makedirs(self.dir)
+
+    def write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_jsonc_wins_over_json(self):
+        """Measured: with both present opencode loads the .jsonc and never reads
+        the other, so naming the other would send somebody to edit a dead file."""
+        self.write("opencode.json", '{"username": "plain"}')
+        self.write("opencode.jsonc", '{"username": "commented"}')
+        with env_without_redirects():
+            self.assertTrue(ax.opencode_config_path().endswith("opencode.jsonc"))
+            self.assertEqual(ax.read_opencode_config()["username"], "commented")
+
+    def test_the_shadowed_file_is_reported_rather_than_left_unexplained(self):
+        self.write("opencode.json", "{}")
+        self.write("opencode.jsonc", "{}")
+        findings = []
+        with env_without_redirects():
+            ax.read_opencode_config(findings)
+        self.assertTrue(any("opencode.json" in f["what"] for f in findings), findings)
+
+    def test_a_lone_json_is_still_the_one_that_is_read(self):
+        self.write("opencode.json", '{"username": "plain"}')
+        with env_without_redirects():
+            self.assertTrue(ax.opencode_config_path().endswith("opencode.json"))
+            self.assertEqual(ax.read_opencode_config()["username"], "plain")
+
+    def test_an_absent_config_names_the_plain_file_and_finds_nothing(self):
+        findings = []
+        with env_without_redirects():
+            self.assertTrue(ax.opencode_config_path().endswith("opencode.json"))
+            self.assertEqual(ax.read_opencode_config(findings), {})
+        self.assertEqual(findings, [])
+
+    def test_an_additional_config_merges_its_servers_in(self):
+        """OPENCODE_CONFIG names a further file rather than replacing the global
+        one, so a server declared in either has to survive the merge."""
+        self.write("opencode.json", '{"mcp": {"first": {"type": "local"}}}')
+        extra = os.path.join(self.home, "extra.json")
+        with open(extra, "w", encoding="utf-8") as fh:
+            fh.write('{"mcp": {"second": {"type": "remote"}}}')
+        with env_without_redirects(OPENCODE_CONFIG=extra):
+            servers = ax.read_opencode_config()["mcp"]
+        self.assertEqual(sorted(servers), ["first", "second"])
+
+    def test_inline_content_merges_last(self):
+        self.write("opencode.json", '{"mcp": {"first": {"type": "local"}}}')
+        with env_without_redirects(
+                OPENCODE_CONFIG_CONTENT='{"mcp": {"third": {"type": "local"}}}'):
+            servers = ax.read_opencode_config()["mcp"]
+        self.assertEqual(sorted(servers), ["first", "third"])
+
+    def test_inline_content_that_will_not_parse_is_a_finding_not_a_crash(self):
+        findings = []
+        with env_without_redirects(OPENCODE_CONFIG_CONTENT="{not json"):
+            ax.read_opencode_config(findings)
+        self.assertTrue(any(f["what"] == "OPENCODE_CONFIG_CONTENT" for f in findings), findings)
+
+    def test_inline_content_larger_than_the_read_limit_is_refused(self):
+        findings = []
+        with env_without_redirects(OPENCODE_CONFIG_CONTENT="{" + " " * ax.MAX_READ):
+            ax.read_opencode_config(findings)
+        self.assertTrue(any("not read" in f["detail"] for f in findings), findings)
 
 
 class InvalidYaml(unittest.TestCase):
@@ -1155,6 +1391,9 @@ class DescribeCase(unittest.TestCase):
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
+        stack = contextlib.ExitStack()
+        stack.enter_context(env_without_redirects())
+        self.addCleanup(stack.close)
         for name in ("HOME", "STORE_DIR", "STORE_PATH", "DESCRIBE_PATH"):
             self.addCleanup(setattr, ax, name, getattr(ax, name))
         ax.HOME = self.home
