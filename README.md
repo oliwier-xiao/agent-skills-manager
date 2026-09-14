@@ -48,6 +48,18 @@ omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --en
 install it disabled, read the code first, and turn it on later with `omarchy plugin enable
 oliwier.agent-skills-manager`.
 
+## Update
+
+```
+omarchy plugin update oliwier.agent-skills-manager
+omarchy restart shell
+```
+
+The restart is not optional. A QML component the shell has already built keeps the code it was built
+from, so the widget goes on running the old version with nothing to tell you — the new files are on
+disk and `omarchy plugin list` shows the new number. A known Quickshell component-cache limitation,
+reported upstream several times over.
+
 ## What it reads, what it writes
 
 It reads the ten directories the five agents keep skills in, plus the skills inside installed Claude
@@ -343,18 +355,6 @@ terminal.
 
 Whichever of the five agents you actually use is the one you get rows for. An agent that is not
 installed is one quiet line saying so, not an error.
-
-## Update
-
-```
-omarchy plugin update oliwier.agent-skills-manager
-omarchy restart shell
-```
-
-The restart is not optional. A QML component the shell has already built keeps the code it was built
-from, so the widget goes on running the old version with nothing to tell you — the new files are on
-disk and `omarchy plugin list` shows the new number. A known Quickshell component-cache limitation,
-reported upstream several times over.
 
 ## Remove
 
