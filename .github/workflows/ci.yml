@@ -27,8 +27,18 @@ jobs:
           ! grep -nE '^\s*(import|from)\s+(yaml|requests|toml[^l]|tomlkit)' bin/agent-skills
       - name: Scan survives an empty HOME
         # No agent installed at all is a normal first run, not an error.
+        #
+        # The variables are cleared rather than left alone because OpenCode
+        # resolves its config file, its skills root and its MCP token file
+        # through XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_DATA_HOME rather than
+        # through $HOME -- so on any machine with a desktop session (Omarchy
+        # sets all three) an "empty HOME" still reaches the real directories and
+        # this check quietly stops asking what it says it asks. A bare runner
+        # has none of them set, which is exactly why the gap survives CI.
         run: |
-          HOME=$(mktemp -d) python3 bin/agent-skills scan | python3 -c \
+          env -u XDG_CONFIG_HOME -u XDG_CACHE_HOME -u XDG_DATA_HOME \
+              -u OPENCODE_CONFIG -u OPENCODE_CONFIG_DIR -u OPENCODE_CONFIG_CONTENT \
+              HOME=$(mktemp -d) python3 bin/agent-skills scan | python3 -c \
             'import json,sys; d=json.load(sys.stdin); assert d["items"]==[], d; print("empty HOME ok")'
 
   preflight:
