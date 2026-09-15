@@ -1152,13 +1152,33 @@ Panel {
       lines.push("   source: " + (f.source || "not recorded"))
     }
     lines.push("")
+    if (!one) {
+      lines.push("Report as one list with " + entries.length + " lines, one per skill, in the same")
+      lines.push("order and numbering as above. A missing number is a failed report. One line")
+      lines.push("looks like this:")
+      lines.push("  3. systematic-debugging — moved (source: github.com/owner/repo@a1b2c3d;")
+      lines.push("  defense-in-depth.md gained a new section on X)")
+    } else {
+      lines.push("Answer with one verdict plus the evidence, like this:")
+      lines.push("  systematic-debugging — moved (source: github.com/owner/repo@a1b2c3d;")
+      lines.push("  defense-in-depth.md gained a new section on X)")
+    }
+    lines.push("The verdict is always one of: moved, unchanged, could not identify.")
+    lines.push("I would rather have \"could not identify\" than a guess.")
+    lines.push("")
     lines.push("Rules:")
     var rules = root.updateRulesFor(recorded, entries.length)
     for (var k = 0; k < rules.length; k++) lines.push(rules[k])
+    lines.push("")
+    lines.push("Before answering, confirm:")
     if (!one) {
-      lines.push("- Work through them and report as one list: moved, unchanged, or could not")
-      lines.push("  identify. I would rather have \"could not identify\" than a guess.")
+      lines.push("- [ ] all " + entries.length + " skills above have exactly one verdict, in order")
+      lines.push("- [ ] every \"moved\" names the source URL and commit it was compared against")
+    } else {
+      lines.push("- [ ] the verdict is exactly one of: moved, unchanged, could not identify")
+      lines.push("- [ ] a \"moved\" verdict names the source URL and commit")
     }
+    lines.push("- [ ] nothing was written to disk in this run")
     return lines.join("\n")
   }
 
