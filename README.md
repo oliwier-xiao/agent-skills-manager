@@ -145,6 +145,26 @@ recorded commit, usually no version — so there is no honest way to say a newer
 panel does not pretend. Two copies of one name declaring different versions is drift, which is a
 comparison between two things it can actually see.
 
+### Asking something else to check
+
+**update**, beside **note**, is the way to ask anyway. It puts a prompt on your clipboard — for an
+agent, not for a shell — carrying everything this panel read about that skill: the name its author
+declared, the file, the content hash, which agents load it, and the commit it was installed at on
+the one kind of row that records one. `^A` does the same from the keyboard, for *ask*, because
+asking is the whole of what happens here.
+
+The instructions matter more than the facts. An agent told only to check for updates will find a
+plausible repository, overwrite the file, and bury whatever you had edited into it. So the prompt
+makes identifying the source a step that is allowed to fail — **do not guess at a repository** —
+asks for what changed rather than a verdict, and requires your edits to be named before anything is
+written.
+
+One row in fifty-six can name its own source here. A skill installed as part of a Claude Code plugin
+carries the commit Claude Code installed it at, because `installed_plugins.json` records one; that
+row's prompt says so, and the question becomes *what changed since this commit*. Every other row
+says it records none and sends the agent looking. That asymmetry is the truth about how skills
+arrive: they are copied, and a copy remembers nothing.
+
 ### One skill, five agents
 
 ![diagnose-crash, reachable from every root that matters](docs/mounts.png)
@@ -338,6 +358,7 @@ agree.
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
 | `^D` | write your own note about the row |
+| `^A` | copy a prompt asking an agent to check this skill against its source |
 | `^G` | regroup by category, tool, kind or nothing |
 | `^R` | read everything again |
 | `!` | show only what needs attention, while the search is empty |

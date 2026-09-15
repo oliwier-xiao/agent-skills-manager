@@ -1032,6 +1032,64 @@ Panel {
     return out.join(" ")
   }
 
+  // The question this panel cannot answer, written out for something that can.
+  //
+  // A skill directory carries no remote and usually no version, so nothing here
+  // can say a newer one exists -- and the rest of this file is careful never to
+  // imply otherwise. What it can do is hand over everything it read: the name
+  // the author declared, the file, the hash, who loads it, and the marketplace
+  // commit on the one kind of row that has one. The agent does the fetching.
+  //
+  // The instructions are the load-bearing half. An agent told only "check for
+  // updates" will find a plausible repository, overwrite the file, and bury
+  // whatever the reader had edited into it; the numbered steps exist to make
+  // identifying the source a step that can fail, and local edits a thing named
+  // before anything is written.
+  function updatePromptFor(item, invocations) {
+    var name = root.clean(item.displayName || item.dirName, 120)
+    var dir = root.clean(item.dirName, 120)
+    var file = root.tildify(String(item.realPath || "")) + "/SKILL.md"
+    var version = root.clean(item.declaredVersion, 32)
+    var origin = item.origin || ({})
+    var readers = []
+    for (var i = 0; i < invocations.length; i++) readers.push(invocations[i].tool)
+
+    var known = !!origin.installedSha || !!origin.url
+    var lines = [
+      "Check whether this agent skill has a newer version upstream, and update it if it does.",
+      "",
+      "Skill:            " + name,
+      "Directory:        " + dir,
+      "File:             " + file,
+      "Declared version: " + (version || "none — the author declared no version"),
+      "Content hash:     " + root.clean(item.contentHash, 40),
+      "Read by:          " + (readers.length ? readers.join(", ") : "nothing on this machine")
+    ]
+    if (origin.installedSha)
+      lines.push("Installed from:   the " + root.clean(origin.plugin, 64) + " plugin"
+                 + (origin.marketplace
+                    ? ", from the " + root.clean(origin.marketplace, 64) + " marketplace" : "")
+                 + ", at commit " + root.clean(String(origin.installedSha), 64))
+    lines.push("")
+    lines.push("Do this:")
+    lines.push("")
+    if (known) {
+      lines.push("1. The source is recorded above. Read it at that commit, then at its")
+      lines.push("   current head, so \"changed\" means changed since I installed it.")
+    } else {
+      lines.push("1. Find the source. This copy records none, so search for the skill by name")
+      lines.push("   and confirm a candidate against the description in its frontmatter before")
+      lines.push("   trusting it. If you cannot identify the source with confidence, say so")
+      lines.push("   and stop — do not guess at a repository.")
+    }
+    lines.push("2. Compare the upstream SKILL.md, and every file beside it, against what is")
+    lines.push("   on disk here. Tell me what actually changed. \"Newer\" is not a finding.")
+    lines.push("3. If this copy has been edited locally, say which parts are mine before you")
+    lines.push("   touch anything. Pulling upstream in must not silently revert my edits.")
+    lines.push("4. Ask before writing, then write only the files you named in step 2.")
+    return lines.join("\n")
+  }
+
   function skillView(item) {
     var codes = Array.isArray(item.attention) ? item.attention : []
     var words = []
@@ -1181,6 +1239,7 @@ Panel {
       variants: variants,
       declaredVersion: root.clean(item.declaredVersion, 32),
       invocations: invocations,
+      updatePrompt: root.updatePromptFor(item, invocations),
       argumentChoices: args,
       argumentHint: root.clean(item.argumentHint, 200),
       describe: describe,
@@ -2514,6 +2573,17 @@ Panel {
   // take Ctrl for the reason every command here does: the panel promises "Type
   // to search" and every printable key keeps that promise. Neither letter was in
   // use.
+  function askAboutUpdate() {
+    var r = root.currentRow()
+    if (!r) return
+    if (r.rowType === "header") { root.flash("A group header is not a skill to ask about"); return }
+    if (!r.view.updatePrompt) {
+      root.flash("Only a skill has a file an agent could update")
+      return
+    }
+    root.copyText(r.view.updatePrompt, r.key)
+  }
+
   function describeCurrent() {
     var r = root.currentRow()
     if (!r) return
@@ -3045,6 +3115,7 @@ Panel {
     signal revealRequested(string path)
     signal shelveRequested()
     signal describeRequested()
+    signal updateRequested()
 
     // Through root rather than inline, and not only to avoid saying it twice: a
     // `property var` whose binding opens with a brace is read as an object
@@ -4205,6 +4276,15 @@ Panel {
               onPicked: er.describeRequested()
             }
 
+            // Only where there is a file to update and a prompt built for it.
+            // An MCP server is neither, and a row whose SKILL.md could not be
+            // read has nothing to describe to an agent.
+            CardChip {
+              visible: !!er.view.updatePrompt
+              label: "update"
+              onPicked: er.updateRequested()
+            }
+
             // After the last chip, whichever chip that turns out to be, and in
             // the same line rather than under it. It used to open a row of its
             // own in the corner below, which cost the card a line of height it
@@ -4489,6 +4569,13 @@ Panel {
           // One letter nothing here was using, for the note this panel keeps in
           // its own file. It opens a screen rather than doing anything.
           if (letter === "d") { root.describeCurrent(); event.accepted = true; return }
+          // `a` for ask, because asking is what this does -- nothing here can
+          // update a skill. `u` would read better and belongs to the shell:
+          // Util.editsFilter gives Ctrl+U to "clear the field" desktop-wide, so
+          // taking it would work only while the search was empty, which is the
+          // opposite of when this is wanted. You find the skill first, then ask
+          // about it.
+          if (letter === "a") { root.askAboutUpdate(); event.accepted = true; return }
           return
         }
 
@@ -5604,6 +5691,14 @@ Panel {
                   root.openPicker(rowHost.modelData)
                 else root.copyText(text, rowHost.modelData.key)
               }
+              // Straight to the clipboard rather than through the invocation
+              // path: the argument picker asks which form of the command you
+              // want, and this is not a command.
+              onUpdateRequested: {
+                root.cursorActive = true
+                root.selectedIndex = rowHost.index
+                root.copyText(rowHost.modelData.view.updatePrompt, rowHost.modelData.key)
+              }
             }
           }
         }
@@ -5642,6 +5737,8 @@ Panel {
             // is one the reader has to map.
             var dsc = cur && cur.rowType !== "header" ? root.describeOf(cur) : null
             if (dsc) parts.push("^D for a note")
+            if (cur && cur.rowType !== "header" && cur.view && cur.view.updatePrompt)
+              parts.push("^A to ask about updates")
             parts.push("^G to regroup")
             parts.push("^R to rescan")
             parts.push(root.expandedKey !== "" || typing || root.anyChipFilter

@@ -1214,14 +1214,23 @@ def plugin_skill_roots() -> list[dict]:
         name = pid.split("@", 1)[0]
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name):
             continue
+        market = pid.split("@", 1)[1] if "@" in pid else ""
         for entry in as_list(entries):
             path = as_dict(entry).get("installPath")
             if not isinstance(path, str) or not path.startswith("/"):
                 continue
+            # The one provenance any skill on this machine actually has. A skill
+            # directory carries no remote, but Claude Code records the commit it
+            # installed a plugin from, so the skills inside that plugin came from
+            # a commit somebody can name. Carried onto the row rather than left
+            # on the plugin, because the row is what a reader is looking at.
+            sha = as_dict(entry).get("gitCommitSha")
             out.append({"path": os.path.join(path, "skills"),
                         "tools": ["claude"],
                         "scope": clip(as_dict(entry).get("scope") or "plugin", 16),
-                        "plugin": name})
+                        "plugin": name,
+                        "marketplace": clip(market, 128),
+                        "sha": clip(sha, 64) if isinstance(sha, str) else ""})
     return out
 
 
@@ -1462,6 +1471,24 @@ def _walk_exhausted(by_real: dict, findings: list, deadline: float, where: str) 
     return True
 
 
+def _origin_of(root: dict) -> dict:
+    """Where this skill came from, on the rare row that can answer.
+
+    A skill directory is not a checkout: no remote, no recorded commit, usually
+    no version. The one exception is a skill shipped inside a Claude Code
+    plugin, because `installed_plugins.json` records the commit that plugin was
+    installed from. Everything else reports `none`, which is the truth and is
+    what stops the panel from implying it checked.
+    """
+    sha = root.get("sha") or ""
+    if not root.get("plugin") or not sha:
+        return {"type": "none", "url": None, "confidence": "unknown"}
+    market = root.get("marketplace") or ""
+    return {"type": "plugin", "url": None, "confidence": "recorded",
+            "plugin": root.get("plugin"), "marketplace": market,
+            "installedSha": sha}
+
+
 def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
             descriptions, divisor, findings, bundled=False):
     skill_md = os.path.join(dir_path, "SKILL.md")
@@ -1612,7 +1639,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                   "source": "claude.json" if u else "not tracked"},
         "taxonomy": {**tax, "tags": tags_for(display, description),
                      "glyph": GLYPH.get(tax["category"], CUSTOM_GLYPH)},
-        "origin": {"type": "none", "url": None, "confidence": "unknown"},
+        "origin": _origin_of(root),
         "update": {"state": "unknown"},
         "attention": attention,
         "flags": {"builtin": bundled, "readOnly": bundled,
