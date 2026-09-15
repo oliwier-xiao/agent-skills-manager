@@ -148,8 +148,8 @@ comparison between two things it can actually see.
 ### Asking something else to check
 
 **update**, beside **note**, is the way to ask anyway. It puts a prompt on your clipboard — for an
-agent, not for a shell — carrying everything this panel read about that skill: the name its author
-declared, the file, the content hash, which agents load it, and the commit it was installed at on
+agent, not for a shell — carrying everything this panel read about that skill: its file, the version
+its author declared, the content hash, which agents load it, and the commit it was installed at on
 the one kind of row that records one. `^A` does the same from the keyboard, for *ask*, because
 asking is the whole of what happens here.
 
@@ -159,11 +159,31 @@ makes identifying the source a step that is allowed to fail — **do not guess a
 asks for what changed rather than a verdict, and requires your edits to be named before anything is
 written.
 
+It carries only the rules the skills in it can run into. Ask about a copy that records no commit and
+the rule about comparing commits is not in the prompt at all: a line an agent has to read and
+discard is a line spent, and the shorter the prompt the better the odds every line of it is obeyed.
+
 One row in fifty-six can name its own source here. A skill installed as part of a Claude Code plugin
 carries the commit Claude Code installed it at, because `installed_plugins.json` records one; that
 row's prompt says so, and the question becomes *what changed since this commit*. Every other row
 says it records none and sends the agent looking. That asymmetry is the truth about how skills
 arrive: they are copied, and a copy remembers nothing.
+
+### All of them at once
+
+**Updates**, beside **Edit** in the corner, asks the same question about everything currently
+listed. It is the same prompt with more entries in it — one skill or fifty-six, the same four lines
+each and the same rules — because a row deserving its own shape would have been two vocabularies
+for one question, and the longer of the two would have been the one asking about less.
+
+**Currently listed** is the operative phrase. Every filter on this panel narrows it: pick a
+category, an agent, or type a search, and the question narrows with it, exactly as the counts do.
+Filter to one shelf and you are asking about that shelf. With built-in skills hidden, which is the
+default, they are not in the question either — you did not install them and cannot update them.
+
+The button is gone while the category editor is open, because Edit has become Back and the list
+behind it is not what you are looking at, and gone when nothing is listed, because there is nothing
+to ask about.
 
 ### One skill, five agents
 
