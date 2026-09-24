@@ -10,6 +10,10 @@ This is that list: everything all five can load, with what it costs in tokens on
 agent can see it, and the command that invokes it — on your clipboard, in the spelling that agent
 expects.
 
+| Install | Update | Remove |
+|---|---|---|
+| `omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --enable` | `omarchy plugin update oliwier.agent-skills-manager` | `omarchy plugin remove oliwier.agent-skills-manager` |
+
 ![The panel, grouped by category](docs/panel.png)
 
 The boxes across the top count it by agent, by kind and by what is flagged, and each one is also a
@@ -144,6 +148,46 @@ Nothing is checked against anywhere upstream. A skill directory is not a checkou
 recorded commit, usually no version — so there is no honest way to say a newer one exists, and the
 panel does not pretend. Two copies of one name declaring different versions is drift, which is a
 comparison between two things it can actually see.
+
+### Asking something else to check
+
+**update**, beside **note**, is the way to ask anyway. It puts a prompt on your clipboard — for an
+agent, not for a shell — carrying everything this panel read about that skill: its file, the version
+its author declared, the content hash, which agents load it, and the commit it was installed at on
+the one kind of row that records one. `^A` does the same from the keyboard, for *ask*, because
+asking is the whole of what happens here.
+
+The instructions matter more than the facts. An agent told only to check for updates will find a
+plausible repository, overwrite the file, and bury whatever you had edited into it. So the prompt
+makes identifying the source a step that is allowed to fail — **do not guess at a repository** —
+asks for what changed rather than a verdict, and requires your edits to be named before anything is
+written.
+
+It carries only the rules the skills in it can run into. Ask about a copy that records no commit and
+the rule about comparing commits is not in the prompt at all: a line an agent has to read and
+discard is a line spent, and the shorter the prompt the better the odds every line of it is obeyed.
+
+One row in fifty-six can name its own source here. A skill installed as part of a Claude Code plugin
+carries the commit Claude Code installed it at, because `installed_plugins.json` records one; that
+row's prompt says so, and the question becomes *what changed since this commit*. Every other row
+says it records none and sends the agent looking. That asymmetry is the truth about how skills
+arrive: they are copied, and a copy remembers nothing.
+
+### All of them at once
+
+**Updates**, beside **Edit** in the corner, asks the same question about everything currently
+listed. It is the same prompt with more entries in it — one skill or fifty-six, the same four lines
+each and the same rules — because a row deserving its own shape would have been two vocabularies
+for one question, and the longer of the two would have been the one asking about less.
+
+**Currently listed** is the operative phrase. Every filter on this panel narrows it: pick a
+category, an agent, or type a search, and the question narrows with it, exactly as the counts do.
+Filter to one shelf and you are asking about that shelf. With built-in skills hidden, which is the
+default, they are not in the question either — you did not install them and cannot update them.
+
+The button is gone while the category editor is open, because Edit has become Back and the list
+behind it is not what you are looking at, and gone when nothing is listed, because there is nothing
+to ask about.
 
 ### One skill, five agents
 
@@ -338,6 +382,7 @@ agree.
 | `^E` | open the categories: rename one, recolour it, or add one |
 | `^O` | open where the skill is installed, in your file manager |
 | `^D` | write your own note about the row |
+| `^A` | copy a prompt asking an agent to check this skill against its source |
 | `^G` | regroup by category, tool, kind or nothing |
 | `^R` | read everything again |
 | `!` | show only what needs attention, while the search is empty |
@@ -379,7 +424,7 @@ them:
 rm -rf ~/.config/agent-skills
 ```
 
-That is the two files named at the top of this README, and nothing else — every skill on the machine
+That is the two files named above, and nothing else — every skill on the machine
 is exactly where it was.
 
 ## The command line

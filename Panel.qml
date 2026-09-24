@@ -1032,6 +1032,156 @@ Panel {
     return out.join(" ")
   }
 
+  // The question this panel cannot answer, written out for something that can.
+  //
+  // A skill directory carries no remote and usually no version, so nothing here
+  // can say a newer one exists -- and the rest of this file is careful never to
+  // imply otherwise. What it can do is hand over everything it read: the name
+  // the author declared, the file, the hash, who loads it, and the marketplace
+  // commit on the one kind of row that has one. The agent does the fetching.
+  //
+  // The instructions are the load-bearing half. An agent told only "check for
+  // updates" will find a plausible repository, overwrite the file, and bury
+  // whatever the reader had edited into it; the numbered steps exist to make
+  // identifying the source a step that can fail, and local edits a thing named
+  // before anything is written.
+  function updateFactsFor(item, invocations) {
+    var origin = item.origin || ({})
+    var readers = []
+    for (var i = 0; i < invocations.length; i++) readers.push(invocations[i].tool)
+    var source = ""
+    if (origin.installedSha)
+      source = "the " + root.clean(origin.plugin, 64) + " plugin"
+               + (origin.marketplace
+                  ? ", from the " + root.clean(origin.marketplace, 64) + " marketplace" : "")
+               + ", at commit " + root.clean(String(origin.installedSha), 64)
+    return {
+      name: root.clean(item.displayName || item.dirName, 120),
+      dir: root.clean(item.dirName, 120),
+      file: root.tildify(String(item.realPath || "")) + "/SKILL.md",
+      version: root.clean(item.declaredVersion, 32),
+      hash: root.clean(item.contentHash, 40),
+      readers: readers.length ? readers.join(", ") : "nothing on this machine",
+      source: source
+    }
+  }
+
+  // The load-bearing half of any of these prompts: an agent told only to check
+  // for updates finds a plausible repository, overwrites the file, and buries
+  // whatever the reader had edited into it.
+  //
+  // Only the rules the listed skills can actually run into. Telling an agent
+  // what to do about a recorded commit, when not one of them records a commit,
+  // is a line it has to read and discard -- and the shorter the prompt, the
+  // better the odds every line of it is obeyed.
+  function updateRulesFor(recorded, total) {
+    var out = []
+    if (recorded < total)
+      out = out.concat([
+        "- Identifying the source may fail. Where none is recorded, search by name and",
+        "  confirm a candidate against the description in its frontmatter before trusting",
+        "  it. If you cannot identify one with confidence, say so — do not guess at a",
+        "  repository."])
+    if (recorded > 0)
+      out = out.concat([
+        "- Where a commit is recorded, compare it against the current head, so \"changed\"",
+        "  means changed since I installed it."])
+    return out.concat([
+      "- Compare the SKILL.md and every file beside it. Tell me what actually changed;",
+      "  \"newer\" is not a finding.",
+      "- Where a copy has been edited locally, say which parts are mine before you touch",
+      "  it. Pulling upstream in must not silently revert my edits.",
+      "- Ask before writing, and then write only what you named."])
+  }
+
+  // Every skill currently listed, which is the point: the filters are how you
+  // choose what to ask about. Narrow to a category, a tool or a search and the
+  // question narrows with it, the same way every count on this panel does.
+  function updateCandidates() {
+    var query = root.fold(root.filterText.trim())
+    var out = []
+    for (var i = 0; i < root.catalogue.length; i++) {
+      var v = root.catalogue[i]
+      if (v.kind !== "skill" || !v.updateFacts) continue
+      if (!root.passes(v, "", query)) continue
+      out.push(v.updateFacts)
+    }
+    return out
+  }
+
+  readonly property int bulkUpdateCount: root.loaded ? root.updateCandidates().length : 0
+
+  // One skill or fifty-eight: the same prompt with a different number of entries
+  // in it. A row was getting its own shape -- eight labelled lines where the
+  // list gave four -- which is two vocabularies for one question, and the
+  // longer of the two was the one asking about less.
+  function updatePromptFor(entries) {
+    if (!entries || entries.length === 0) return ""
+
+    var recorded = 0
+    for (var c = 0; c < entries.length; c++) if (entries[c].source) recorded++
+
+    var one = entries.length === 1
+    var provenance =
+      one ? (recorded ? "It records where it came from."
+                      : "It records no source, which is the ordinary case.")
+      : recorded === 0 ? "None of them records where it came from."
+      : recorded === entries.length ? "Every one of them records where it came from."
+      : recorded === 1 ? "One of them records where it came from; the rest do not."
+      : recorded + " of them record where they came from; the rest do not."
+
+    var lines = entries.length === 1
+      ? ["Check this agent skill against its source, and tell me whether it has moved.", ""]
+      : ["Check these " + entries.length + " agent skills against their sources, and tell me",
+         "which ones have moved.", ""]
+    lines.push("Listed below with everything my skills panel could read about "
+               + (one ? "it." : "them."))
+    lines.push(provenance)
+    if (recorded < entries.length) {
+      lines.push("A skill directory is not a checkout, so a copy remembers nothing — treat one")
+      lines.push("with no recorded source as the harder case, not as a licence to guess.")
+    }
+    lines.push("")
+    for (var e = 0; e < entries.length; e++) {
+      var f = entries[e]
+      lines.push(one ? f.name : (e + 1) + ". " + f.name)
+      lines.push("   " + f.file)
+      lines.push("   version: " + (f.version || "none")
+                 + " · hash: " + f.hash
+                 + " · read by: " + f.readers)
+      lines.push("   source: " + (f.source || "not recorded"))
+    }
+    lines.push("")
+    if (!one) {
+      lines.push("Report as one list with " + entries.length + " lines, one per skill, in the same")
+      lines.push("order and numbering as above. A missing number is a failed report. One line")
+      lines.push("looks like this:")
+      lines.push("  3. systematic-debugging — moved (source: github.com/owner/repo@a1b2c3d;")
+      lines.push("  defense-in-depth.md gained a new section on X)")
+    } else {
+      lines.push("Answer with one verdict plus the evidence, like this:")
+      lines.push("  systematic-debugging — moved (source: github.com/owner/repo@a1b2c3d;")
+      lines.push("  defense-in-depth.md gained a new section on X)")
+    }
+    lines.push("The verdict is always one of: moved, unchanged, could not identify.")
+    lines.push("I would rather have \"could not identify\" than a guess.")
+    lines.push("")
+    lines.push("Rules:")
+    var rules = root.updateRulesFor(recorded, entries.length)
+    for (var k = 0; k < rules.length; k++) lines.push(rules[k])
+    lines.push("")
+    lines.push("Before answering, confirm:")
+    if (!one) {
+      lines.push("- [ ] all " + entries.length + " skills above have exactly one verdict, in order")
+      lines.push("- [ ] every \"moved\" names the source URL and commit it was compared against")
+    } else {
+      lines.push("- [ ] the verdict is exactly one of: moved, unchanged, could not identify")
+      lines.push("- [ ] a \"moved\" verdict names the source URL and commit")
+    }
+    lines.push("- [ ] nothing was written to disk in this run")
+    return lines.join("\n")
+  }
+
   function skillView(item) {
     var codes = Array.isArray(item.attention) ? item.attention : []
     var words = []
@@ -1181,6 +1331,7 @@ Panel {
       variants: variants,
       declaredVersion: root.clean(item.declaredVersion, 32),
       invocations: invocations,
+      updateFacts: root.updateFactsFor(item, invocations),
       argumentChoices: args,
       argumentHint: root.clean(item.argumentHint, 200),
       describe: describe,
@@ -1697,7 +1848,16 @@ Panel {
   // a separate process whose exit code arrives later than this function does,
   // so a copy that got that far is reported as handed over rather than as
   // confirmed. The panel never claims more than it knows.
-  function copyText(s, rowKey) {
+  // A prompt is hundreds of characters and the toast prints what it copied, so
+  // copying one through copyText would put a wall of its own text on screen
+  // where the confirmation goes. This says what landed instead of showing it.
+  function copyPrompt(text, rowKey, what) {
+    if (String(text || "") === "") { root.flash("Nothing here to ask about"); return false }
+    var ok = root.copyText(text, rowKey, what)
+    return ok
+  }
+
+  function copyText(s, rowKey, describedAs) {
     var text = String(s || "")
     if (text === "") return false
 
@@ -1716,6 +1876,11 @@ Panel {
       catch (e2) { attempted = false }
     }
 
+    // What to put in the confirmation. An invocation is short and showing it is
+    // the point -- it is what will be pasted. A prompt is hundreds of characters
+    // and naming it is the only readable option.
+    var shown = String(describedAs || "") || text
+
     if (!attempted) {
       root.flashResult("Could not reach the clipboard. The command is " + text, "error")
       return false
@@ -1723,7 +1888,7 @@ Panel {
 
     root.copiedKey = String(rowKey || "")
     copiedTimer.restart()
-    root.flashResult((confirmed ? "Copied  " : "Sent to the clipboard  ") + text, "ok")
+    root.flashResult((confirmed ? "Copied  " : "Sent to the clipboard  ") + shown, "ok")
     return true
   }
 
@@ -2514,6 +2679,31 @@ Panel {
   // take Ctrl for the reason every command here does: the panel promises "Type
   // to search" and every printable key keeps that promise. Neither letter was in
   // use.
+  function askAboutUpdate() {
+    var r = root.currentRow()
+    if (!r) return
+    if (r.rowType === "header") { root.flash("A group header is not a skill to ask about"); return }
+    if (!r.view.updateFacts) {
+      root.flash("Only a skill has a file an agent could update")
+      return
+    }
+    root.copyPrompt(root.updatePromptFor([r.view.updateFacts]), r.key,
+                    "the prompt for " + r.view.name
+                    + " — paste it to your agent to check that skill for updates")
+  }
+
+  function askAboutAllUpdates() {
+    var text = root.updatePromptFor(root.updateCandidates())
+    if (text === "") {
+      root.flash(root.anyChipFilter || root.filterText !== ""
+                 ? "No skills in what you have filtered to"
+                 : "No skills to ask about")
+      return
+    }
+    root.copyPrompt(text, "", "the prompt for all " + root.bulkUpdateCount
+                    + " skills — paste it to your agent to check them for updates")
+  }
+
   function describeCurrent() {
     var r = root.currentRow()
     if (!r) return
@@ -2644,6 +2834,52 @@ Panel {
   // Every one of them is a click as well as a key, for the reason this file
   // argues about the shelf chip and the paths below it: a key hint in a footer
   // is worth nothing to somebody who arrived with a pointer.
+  // Edit and Updates are the same button with different words in it, and were
+  // the same button written twice until this existed. One definition also keeps
+  // the header from drifting: a corner where two controls sit at different
+  // heights is one somebody has to look at twice.
+  component HeaderButton: Rectangle {
+    id: hb
+    property string glyph: ""
+    property string label: ""
+    property bool lit: false
+    signal tapped()
+
+    width: hbRow.implicitWidth + Style.space(20)
+    height: Style.space(26)
+    radius: Style.cornerRadius
+    color: hbHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07)
+
+    readonly property color tone: hbHover.hovered || hb.lit ? root.fg : root.readable
+
+    Row {
+      id: hbRow
+      anchors.centerIn: parent
+      spacing: Style.spacing.sm
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: hb.glyph
+        color: hb.tone
+        font.family: root.face
+        font.pixelSize: Style.font.subtitle
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: hb.label
+        color: hb.tone
+        font.family: root.face
+        font.pixelSize: Style.font.title
+      }
+    }
+
+    HoverHandler { id: hbHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: hb.tapped() }
+  }
+
   component CardChip: Rectangle {
     id: cc
     property string label: ""
@@ -3045,6 +3281,7 @@ Panel {
     signal revealRequested(string path)
     signal shelveRequested()
     signal describeRequested()
+    signal updateRequested()
 
     // Through root rather than inline, and not only to avoid saying it twice: a
     // `property var` whose binding opens with a brace is read as an object
@@ -4205,6 +4442,15 @@ Panel {
               onPicked: er.describeRequested()
             }
 
+            // Only where there is a file to update and a prompt built for it.
+            // An MCP server is neither, and a row whose SKILL.md could not be
+            // read has nothing to describe to an agent.
+            CardChip {
+              visible: !!er.view.updateFacts
+              label: "update"
+              onPicked: er.updateRequested()
+            }
+
             // After the last chip, whichever chip that turns out to be, and in
             // the same line rather than under it. It used to open a row of its
             // own in the corner below, which cost the card a line of height it
@@ -4489,6 +4735,13 @@ Panel {
           // One letter nothing here was using, for the note this panel keeps in
           // its own file. It opens a screen rather than doing anything.
           if (letter === "d") { root.describeCurrent(); event.accepted = true; return }
+          // `a` for ask, because asking is what this does -- nothing here can
+          // update a skill. `u` would read better and belongs to the shell:
+          // Util.editsFilter gives Ctrl+U to "clear the field" desktop-wide, so
+          // taking it would work only while the search was empty, which is the
+          // opposite of when this is wanted. You find the skill first, then ask
+          // about it.
+          if (letter === "a") { root.askAboutUpdate(); event.accepted = true; return }
           return
         }
 
@@ -4629,44 +4882,28 @@ Panel {
               TapHandler { onTapped: if (root.saveArmed) root.saveCurrentEditor() }
             }
 
-            Rectangle {
-              id: editButton
-              width: editRow.implicitWidth + Style.space(20)
-              height: Style.space(26)
-              radius: Style.cornerRadius
-              color: editHover.hovered ? Util.alpha(root.fg, 0.16) : Util.alpha(root.fg, 0.07)
+            // The whole list in one question, beside the button that edits the
+            // whole list. It stands down while the shelf editor is open, where
+            // Edit has become Back and the list behind it is not what you are
+            // looking at; and where nothing is listed there is nothing to ask.
+            //
+            // nf-md-cloud_question (U+F0A39), as a surrogate pair for the same
+            // reason the pencil beside it is one.
+            HeaderButton {
+              visible: !root.pickerOpen && root.bulkUpdateCount > 0
+              glyph: "\uDB82\uDE39"
+              label: "Updates"
+              onTapped: root.askAboutAllUpdates()
+            }
 
-              Row {
-                id: editRow
-                anchors.centerIn: parent
-                spacing: Style.spacing.sm
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  // nf-md-pencil (U+F03EB), as its surrogate pair for the same
-                  // reason the bar mark is: a private-use codepoint pasted in is a
-                  // box in every editor without the font.
-                  text: root.pickerOpen ? "\u2190" : "\uDB80\uDFEB"
-                  color: editHover.hovered || root.pickerOpen ? root.fg : root.readable
-                  font.family: root.face
-                  font.pixelSize: Style.font.subtitle
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: root.pickerOpen ? "Back" : "Edit"
-                  color: editHover.hovered || root.pickerOpen ? root.fg : root.readable
-                  font.family: root.face
-                  font.pixelSize: Style.font.title
-                }
-              }
-
-              HoverHandler { id: editHover; cursorShape: Qt.PointingHandCursor }
-              TapHandler {
-                onTapped: root.pickerOpen ? root.pickerBack() : root.openShelvesPicker()
-              }
+            HeaderButton {
+              // nf-md-pencil (U+F03EB), as its surrogate pair for the same
+              // reason the bar mark is: a private-use codepoint pasted in is a
+              // box in every editor without the font.
+              glyph: root.pickerOpen ? "\u2190" : "\uDB80\uDFEB"
+              label: root.pickerOpen ? "Back" : "Edit"
+              lit: root.pickerOpen
+              onTapped: root.pickerOpen ? root.pickerBack() : root.openShelvesPicker()
             }
           }
         }
@@ -5604,6 +5841,14 @@ Panel {
                   root.openPicker(rowHost.modelData)
                 else root.copyText(text, rowHost.modelData.key)
               }
+              // Straight to the clipboard rather than through the invocation
+              // path: the argument picker asks which form of the command you
+              // want, and this is not a command.
+              onUpdateRequested: {
+                root.cursorActive = true
+                root.selectedIndex = rowHost.index
+                root.copyPrompt(root.updatePromptFor([rowHost.modelData.view.updateFacts]), rowHost.modelData.key, "the prompt for " + rowHost.modelData.view.name + " — paste it to your agent to check that skill for updates")
+              }
             }
           }
         }
@@ -5642,6 +5887,8 @@ Panel {
             // is one the reader has to map.
             var dsc = cur && cur.rowType !== "header" ? root.describeOf(cur) : null
             if (dsc) parts.push("^D for a note")
+            if (cur && cur.rowType !== "header" && cur.view && cur.view.updateFacts)
+              parts.push("^A to ask about updates")
             parts.push("^G to regroup")
             parts.push("^R to rescan")
             parts.push(root.expandedKey !== "" || typing || root.anyChipFilter

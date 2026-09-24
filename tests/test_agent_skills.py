@@ -1025,6 +1025,43 @@ class PluginSkillRoots(unittest.TestCase):
         self.assertEqual(self.roots("{not json"), [])
         self.assertEqual(self.roots("[]"), [])
 
+    def test_the_installed_commit_is_carried_onto_the_root(self):
+        # The only provenance a skill on this machine has. Left on the plugin it
+        # tells the reader nothing about the row they are looking at.
+        roots = self.roots('{"plugins":{"impeccable@impeccable":[{"installPath":"/x/i",'
+                           '"gitCommitSha":"dbdc470e70dbbda69f9b78ee38bc38ea1d3560b9"}]}}')
+        self.assertEqual(roots[0]["sha"], "dbdc470e70dbbda69f9b78ee38bc38ea1d3560b9")
+        self.assertEqual(roots[0]["marketplace"], "impeccable")
+
+    def test_a_plugin_that_recorded_no_commit_carries_none(self):
+        roots = self.roots('{"plugins":{"a@m":[{"installPath":"/x/a"}]}}')
+        self.assertEqual(roots[0]["sha"], "")
+
+
+class WhereASkillCameFrom(unittest.TestCase):
+    """A skill directory carries no remote and no recorded commit. The one
+    exception is a skill shipped inside a Claude Code plugin, whose install
+    commit is recorded. Every other row must report `none`: a row that guessed
+    would put a repository nobody chose in front of an agent told to fetch it.
+    """
+
+    def test_a_plugin_skill_reports_the_commit_it_was_installed_at(self):
+        origin = ax._origin_of({"plugin": "impeccable", "marketplace": "impeccable",
+                                "sha": "dbdc470e70dbbda69f9b78ee38bc38ea1d3560b9"})
+        self.assertEqual(origin["type"], "plugin")
+        self.assertEqual(origin["confidence"], "recorded")
+        self.assertEqual(origin["installedSha"], "dbdc470e70dbbda69f9b78ee38bc38ea1d3560b9")
+        self.assertEqual(origin["plugin"], "impeccable")
+
+    def test_a_loose_directory_reports_none_rather_than_a_guess(self):
+        for root in ({}, {"plugin": "impeccable"}, {"plugin": "impeccable", "sha": ""},
+                     {"sha": "dbdc470e70dbbda69f9b78ee38bc38ea1d3560b9"}):
+            origin = ax._origin_of(root)
+            self.assertEqual(origin["type"], "none", root)
+            self.assertEqual(origin["confidence"], "unknown", root)
+            self.assertIsNone(origin["url"], root)
+            self.assertNotIn("installedSha", origin, root)
+
 
 class DriftVersusVariant(unittest.TestCase):
     """Two copies of one name are not automatically a fault. Impeccable ships one
