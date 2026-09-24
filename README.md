@@ -10,6 +10,10 @@ This is that list: everything all five can load, with what it costs in tokens on
 agent can see it, and the command that invokes it — on your clipboard, in the spelling that agent
 expects.
 
+| Install | Update | Remove |
+|---|---|---|
+| `omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --enable` | `omarchy plugin update oliwier.agent-skills-manager` | `omarchy plugin remove oliwier.agent-skills-manager` |
+
 ![The panel, grouped by category](docs/panel.png)
 
 The boxes across the top count it by agent, by kind and by what is flagged, and each one is also a
@@ -420,7 +424,7 @@ them:
 rm -rf ~/.config/agent-skills
 ```
 
-That is the two files named at the top of this README, and nothing else — every skill on the machine
+That is the two files named above, and nothing else — every skill on the machine
 is exactly where it was.
 
 ## The command line
