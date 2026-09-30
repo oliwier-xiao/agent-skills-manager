@@ -149,9 +149,9 @@ BarWidget {
     return out.join(" \u00b7 ")
   }
 
-  // The figure the bar prints. Three agents read three different sets of skills
-  // off one disk and are charged three different bills for them, so "the tokens"
-  // was never one number: it was the largest of the three, which is the right
+  // The figure the bar prints. The agents read different sets of skills off one
+  // disk and are charged different bills for them, so "the tokens" was never
+  // one number: it was the largest of them, which is the right
   // answer only when the heaviest agent happens to be the one you are sitting in
   // front of. With a live process to point at it is that agent's own bill, and
   // with two of them up it is the two added together, because both are paying.

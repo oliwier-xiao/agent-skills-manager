@@ -1085,7 +1085,7 @@ def read_opencode_config(findings: list | None = None) -> dict:
 
     Reading only the first of them was how a server declared in any of the other
     two went missing from a panel whose whole claim is that it lists everything
-    three agents load.
+    the agents load.
     """
     directory = opencode_config_dir()
     live = opencode_config_path(directory)
@@ -1122,7 +1122,7 @@ def read_opencode_config(findings: list | None = None) -> dict:
 
 
 def skill_roots() -> list[dict]:
-    """Every directory the three agents look in, and which of them look there.
+    """Every directory the agents look in, and which of them look there.
 
     OpenCode reads Claude Code's and the shared ~/.agents directories natively
     unless OPENCODE_DISABLE_EXTERNAL_SKILLS is set; Claude Code reads neither of
@@ -1295,7 +1295,7 @@ def token_estimate(name: str, description: str, when_to_use: str, divisor: int =
 
 # -------------------------------------------------------------------- scan
 
-# Which of the three agents has a live process. Read out of /proc rather than by
+# Which of the agents has a live process. Read out of /proc rather than by
 # asking pgrep, because this helper starts nothing: it is called by a shell that
 # is one process for the whole desktop, and a fork per bar tick is not a cost the
 # bar is allowed to impose. One open and one short read per pid, and a directory
@@ -1508,7 +1508,7 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                     {"tool": tool, "path": mount_path, "abs": dir_path,
                      "link": "symlink" if is_link else "real"})
             # One file reachable from several roots is one skill in several tools.
-            # diagnose-crash is a single SKILL.md that all three agents load, and
+            # diagnose-crash is a single SKILL.md that several agents load, and
             # a `tools` list left at whichever root was scanned first would hide
             # two of them.
             if tool not in existing["tools"]:
@@ -2240,7 +2240,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--version", action="version", version=VERSION)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_scan = sub.add_parser("scan", help="full inventory across all three tools")
+    p_scan = sub.add_parser("scan", help="full inventory across every agent it reads")
     p_scan.add_argument("--divisor", type=int, default=4, choices=(3, 4),
                         help="token estimate divisor (default 4, matching Claude Code)")
     p_scan.add_argument("--pretty", action="store_true", help="indent the JSON")
