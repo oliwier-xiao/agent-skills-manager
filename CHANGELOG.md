@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.1.0
+
+The panel cannot tell you a skill is out of date, and now it does not pretend to:
+it hands the question to something that can answer it.
+
+**Ask about one skill, or the whole list, in one shape.** A per-row **update** chip
+(`^A` from the keyboard, for *ask* — `^U` belongs to the shell and clears the search
+field) copies an agent-directed prompt built from everything the panel read about
+that skill: its file, the declared version, the content hash, which agents load it,
+and the install commit on the one kind of row that records one. **Updates**, beside
+**Edit**, asks the same question about everything currently listed. *Currently
+listed* is the operative phrase: every filter narrows the question exactly as the
+counts narrow, built-ins stay out while they are hidden, and the button stands down
+while the category editor is open or when nothing is listed. One builder serves both,
+so a row never has a longer shape of its own.
+
+**The instructions carry the weight.** Identifying the source is a step that is
+allowed to fail (*do not guess at a repository*); only the rules the listed skills
+can actually run into are included; verdicts are fixed (moved / unchanged / could not
+identify) and the prompt ends on a checklist; local edits must be named before
+anything is written, and the answering run writes nothing. A bulk prompt states its
+own length and calls a missing number a failed report, so an agent cannot quietly skip
+the middle of a long list. The clipboard confirmation names the prompt instead of
+echoing thousands of characters.
+
+**`origin` is no longer blank where it can be known.** A skill shipped inside a Claude
+Code plugin now carries the commit that plugin was installed at, from
+`installed_plugins.json`. Every other row reports none, and none is drawn as none.
+
+Nothing here adds a read or a write: the same ten skill roots and configuration
+files, the same two files under `~/.config/agent-skills/`, no network and no
+subprocess in the helper.
+
 ## 1.0.0
 
 Five agents instead of three, and four config paths that were being read from the

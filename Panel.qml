@@ -18,7 +18,7 @@ import qs.Ui
 pragma ComponentBehavior: Bound
 
 // The panel: one grouped, searchable list of every skill, MCP server and Claude
-// Code plugin the three agents load. bin/agent-skills does all the I/O and prints
+// Code plugin the agents load. bin/agent-skills does all the I/O and prints
 // one line of JSON; this file reads it and draws it, and the only process it
 // runs to read or change any of that is the helper, wrapped in a /bin/bash
 // one-liner that caps the read and takes the whole job group down with it.
