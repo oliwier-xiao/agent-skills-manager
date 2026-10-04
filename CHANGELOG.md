@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.1.1
+
+Nothing you type, and no name a skill author chose, goes into a command line any
+more, and a handful of inputs that could stop the scan or skew a figure no longer do.
+
+**The writes take their change on stdin.** A note, a shelf label and the skill a
+change is about used to travel as arguments to the helper, and an argument is in
+`/proc/<pid>/cmdline` for every account on the machine to read while the process
+lives. The panel now runs `category assign|unassign|create|style --stdin` and
+`describe note --stdin` and writes the change as one JSON object: at most 16 KiB,
+exactly the keys the verb takes, within five seconds, or nothing is written, and the
+refusal never repeats what was sent. A skill named `-h` and a label of `--wip` are now
+just strings: the label used to be refused and a note of `--` was dropped while the
+panel reported it saved.
+
+**The clipboard fallback is `wl-copy` reading stdin.** The copy that stays behind to
+serve the clipboard kept the text in its arguments until something else was copied,
+and a long update prompt was over what one argument may hold.
+
+**Only the scan gets OpenCode's environment.** The panel now forwards every variable
+the helper reads to find what OpenCode loads (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
+`XDG_DATA_HOME`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`,
+`OPENCODE_DISABLE_EXTERNAL_SKILLS`); through 1.1.0 only the last one was passed, so
+the panel counted directories OpenCode had stopped reading. The writes get `PATH`,
+`HOME` and `PYTHONIOENCODING` only, and an empty `HOME` is left out rather than read
+by Python as `/`.
+
+**The update prompt quotes what it read.** Names, paths, versions, hashes and plugin
+sources are in double quotes with JSON escaping, under a line saying they are data,
+and the file path goes through the same cleaning as everything else: a directory
+name with a newline in it could write a `source:` line of its choosing.
+
+**One odd value no longer ends the scan.** A directory name that is not UTF-8, an
+`expiresAt` or `lastUsedAt` that is a string or `1e400`, a `skillUsage` entry that is
+not an object, and a list where the plugin catalog has a name each stopped the whole
+scan with nothing printed. Each is now read past, and a skill that cannot be read is
+one finding.
+
+**Category changes refuse an unreadable store** instead of writing a fresh one over
+it, as notes already did, and neither store can be written larger than it can be
+read back.
+
+**MCP command lines hide more.** `--github-token ghp_…`, `--client-secret …`,
+`--x-api-key …`, `--bearer-token …`, `--cookie …` and the like, given as two
+arguments, now hide their value as `--token …` always did.
+
+Smaller: a skill filed on a shelf that does not exist goes back to the classifier
+instead of leaving the list; `constructor` is no longer a shelf name, because every
+map in the panel already has a key by that name; `~/.config/agent-skills` is made `0700` if it was not; a write that was
+killed leaves no temp file for good; `~/.claude.json` and the plugin catalog cache may
+be up to 16 MiB; findings, paths and plugin fields are bounded and stripped of control
+characters, which `doctor` printed to the terminal as they were; the file manager
+opens the path on disk rather than its display copy; a change that lands during a
+scan gets a scan of its own; the panel waits past the helper's own deadline so a slow
+disk shows a partial list rather than none; the scan wrapper no longer prints
+`[1]+ Done` into `qs log`; and the remains of the removed `SKILL.md` writer are gone.
+
 ## 1.1.0
 
 The panel cannot tell you a skill is out of date, and now it does not pretend to:
