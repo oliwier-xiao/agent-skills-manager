@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """agent-skills — the only part of Agent Skills Manager that touches the filesystem.
 
 One line of JSON on stdout, diagnostics on stderr. The QML reads and draws; it does
@@ -12,9 +12,14 @@ notes you wrote for yourself. No skill's SKILL.md is ever opened for writing, no
 agent's configuration file is touched, nothing is deleted or moved, and no other
 program is started -- this file spawns nothing at all.
 
-Exit codes: 0 done · 1 usage error · 2 refused, nothing written. There is no partial-write
+Exit codes: 0 done · 1 a request that names nothing to do · 2 refused, nothing written,
+which is also what an argument the parser cannot read exits with. There is no partial-write
 code because there is no partial write: the store is built whole, fsynced, and renamed over
 the old one, so a failed write leaves the previous file exactly as it was.
+
+What a person typed, and the name of a skill directory, reach the writing verbs on stdin
+(`--stdin`, one JSON object) when the panel runs them, never in argv: a command line is
+readable by every account on the machine for as long as the process lives.
 """
 
 from __future__ import annotations
@@ -26,11 +31,12 @@ import json
 import math
 import os
 import re
+import select
 import stat
 import sys
 import time
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 HOME = os.path.expanduser("~")
 
 # A skill's SKILL.md is prose. Anything larger than this is not a skill, it is a
@@ -275,10 +281,19 @@ def parse_jsonc_text(txt: str) -> tuple[dict | list | None, str | None]:
     return (stripped, None) if second is None else (None, second)
 
 
-def read_json(path: str, *, jsonc: bool = False) -> tuple[dict | list | None, str | None]:
+# Claude Code's own state files are not configuration somebody writes by hand:
+# ~/.claude.json keeps every project it has opened, and the plugin catalog cache
+# holds a whole marketplace listing. Both pass MAX_READ on a machine that has been
+# used for a while, and then the MCP servers and the usage figures in the one, or
+# the categories in the other, went missing from the panel.
+LARGE_STATE_READ = 16 * 1024 * 1024
+
+
+def read_json(path: str, *, jsonc: bool = False,
+              max_bytes: int = MAX_READ) -> tuple[dict | list | None, str | None]:
     """Returns (value, error). A malformed config is a finding, not a crash."""
     why: list[str] = []
-    txt = read_text(path, why=why)
+    txt = read_text(path, max_bytes=max_bytes, why=why)
     if txt is None:
         return None, (f"refused, {why[0]}" if why else None)
     if not txt.strip():
@@ -306,7 +321,7 @@ def read_toml(path: str) -> tuple[dict | None, str | None]:
 # word. On the joined command line there is nothing to tell one apart from the
 # other, and a header is routinely written `--header X-Api-Key: one two`, so a
 # match that stopped at whitespace left two thirds of the key on screen.
-_SECRET_WORD = r"(?:header|token|api[-_]?key|password|secret|auth[a-z-]*)"
+_SECRET_WORD = r"(?:header|token|api[-_]?key|password|passwd|secret|credential|cookie|bearer|private[-_]?key|auth[a-z-]*)"
 SECRET_FLAG = re.compile(r"(?i)(--?%ss?[= ]).*$" % _SECRET_WORD)
 SECRET_ENVISH = re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=).*$")
 # The same secret carried in the VALUE rather than under a flag that names it.
@@ -322,7 +337,7 @@ SECRET_HEADER = re.compile(r"(?i)(^|[\s=])((?:[a-z0-9]+-)*%s)(\s*:\s*).*$" % _SE
 # for the words, and under that `-h` is help on nearly every launcher and
 # `--host` on several, so folding it in would blank a hostname the panel exists
 # to show.
-SECRET_FLAG_ALONE = re.compile(r"(?i)^(?:--?%ss?|(?-i:-H))$" % _SECRET_WORD)
+SECRET_FLAG_ALONE = re.compile(r"(?i)^(?:--?(?:[a-z0-9]+[-_.])*%ss?|(?-i:-H))$" % _SECRET_WORD)
 # A scheme and an authority, anywhere in an argument: `npx mcp-remote <url>` is
 # how most hosted servers are launched, so the URL is rarely the whole of it.
 URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
@@ -414,6 +429,13 @@ def as_dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _finite_number(value) -> bool:
+    """A JSON number this program can do arithmetic with: not a bool, which is an
+    int to Python, and not the infinity a 1e400 in somebody's file parses to."""
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value))
+
+
 def as_list(value) -> list:
     return value if isinstance(value, list) else []
 
@@ -421,7 +443,7 @@ def as_list(value) -> list:
 def clip(text, limit: int = 512) -> str:
     """Cap every third-party string before it crosses into the shell process."""
     out = "" if text is None else str(text)
-    out = "".join(ch for ch in out if ch == "\t" or ch >= " ")
+    out = "".join(ch for ch in out if ch == "\t" or (ch >= " " and not "\x7f" <= ch <= "\x9f"))
     return out if len(out) <= limit else out[:limit - 1] + "\u2026"
 
 
@@ -664,6 +686,73 @@ TAG_RULES = {
 }
 
 
+# ------------------------------------------------------------ stdin requests
+#
+# Whatever a person typed and whatever a stranger named a directory reaches this
+# program on stdin, never in argv. argv is readable by every local account in
+# /proc/<pid>/cmdline for as long as the process lives; stdin is not.
+MAX_REQUEST = 16 * 1024
+REQUEST_SECONDS = 5.0
+_NONE = type(None)
+STDIN_SCHEMAS = {
+    "assign": {"skill": str, "category": str, "create": bool},
+    "unassign": {"skill": str},
+    "create": {"name": str, "label": (str, _NONE), "color": (str, _NONE)},
+    "style": {"name": str, "label": (str, _NONE), "color": (str, _NONE), "reset": bool},
+    "note": {"skill": str, "text": str},
+}
+
+
+def read_request(schema: dict, fd: int = 0) -> dict | None:
+    """One JSON object from `fd`, bounded in bytes and in time, or None.
+
+    A missing key, an extra one or a wrong type refuses the whole request, and a
+    refusal names the rule and never the content: what arrives here is the thing
+    this design exists to keep out of a process listing, so it is not echoed into
+    stderr either.
+    """
+    buf = bytearray()
+    end = time.monotonic() + REQUEST_SECONDS
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            warn("request: nothing arrived on stdin in time")
+            return None
+        if not select.select([fd], [], [], left)[0]:
+            continue
+        # One byte past the cap, so "exactly the cap" and "over it" differ.
+        chunk = os.read(fd, min(4096, MAX_REQUEST + 1 - len(buf)))
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > MAX_REQUEST:
+            warn(f"request: larger than {MAX_REQUEST} bytes")
+            return None
+    try:
+        value = json.loads(bytes(buf).decode("utf-8"))
+    except (UnicodeDecodeError, RecursionError, ValueError):
+        warn("request: not one JSON object")
+        return None
+    if (not isinstance(value, dict) or set(value) != set(schema)
+            or not all(isinstance(value[k], t) for k, t in schema.items())):
+        warn("request: wrong keys or types")
+        return None
+    return value
+
+
+def _take_request(args, verb: str, positionals: tuple) -> bool:
+    """Fill `args` from stdin for a verb that was given --stdin."""
+    if any(getattr(args, p, None) not in (None, "") for p in positionals):
+        warn("--stdin takes no other arguments")
+        return False
+    request = read_request(STDIN_SCHEMAS[verb])
+    if request is None:
+        return False
+    for key, value in request.items():
+        setattr(args, key, value)
+    return True
+
+
 # ---------------------------------------------------------- category store
 #
 # The one file this program writes, and the only reason it writes anything.
@@ -688,6 +777,18 @@ CUSTOM_GLYPH = "\u25c6"
 # A category name reaches a group header, a JSON file and the classifier's own
 # vocabulary, so it is checked once, here, against a shape rather than cleaned.
 CATEGORY_NAME = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+# The panel counts and labels shelves in plain JavaScript objects keyed by the
+# name, and one name the pattern above allows is already a key of every such
+# object: `constructor`. A shelf called that counted as a function and drew its
+# label as one, so it is no shelf name here, on the way in or on the way back.
+RESERVED_CATEGORY_NAMES = frozenset({"constructor"})
+
+
+def category_name_ok(name) -> bool:
+    return (isinstance(name, str) and CATEGORY_NAME.fullmatch(name) is not None
+            and name not in RESERVED_CATEGORY_NAMES)
+
+
 # How the shelves are drawn. count-desc/count-asc are computed live and ignore
 # the stored order for display (but preserve it, so going back to custom
 # restores the last manual layout); custom draws strictly from it. Only an
@@ -731,20 +832,20 @@ def read_store(findings: list | None = None) -> dict:
                 "order": [], "orderMode": DEFAULT_ORDER_MODE,
                 "hidePlacedBy": False}
     custom = [c for c in as_list(value.get("custom"))
-              if isinstance(c, str) and CATEGORY_NAME.match(c)][:MAX_CUSTOM_CATEGORIES]
+              if isinstance(c, str) and category_name_ok(c)][:MAX_CUSTOM_CATEGORIES]
     assign = {}
     for k, v in list(as_dict(value.get("assign")).items())[:MAX_ASSIGNMENTS]:
-        if isinstance(k, str) and isinstance(v, str) and CATEGORY_NAME.match(v):
+        if isinstance(k, str) and isinstance(v, str) and category_name_ok(v):
             assign[clip(k, 128)] = v
     cap = MAX_CUSTOM_CATEGORIES + len(CATEGORIES)
     labels = {}
     for k, v in list(as_dict(value.get("labels")).items())[:cap]:
-        if isinstance(k, str) and CATEGORY_NAME.match(k) and isinstance(v, str):
+        if isinstance(k, str) and category_name_ok(k) and isinstance(v, str):
             labels[k] = clip(v, 32)
     colors = {}
     for k, v in list(as_dict(value.get("colors")).items())[:cap]:
-        if (isinstance(k, str) and CATEGORY_NAME.match(k)
-                and isinstance(v, str) and HEX_COLOR.match(v)):
+        if (isinstance(k, str) and category_name_ok(k)
+                and isinstance(v, str) and HEX_COLOR.fullmatch(v)):
             colors[k] = v.upper()
     mode = value.get("orderMode")
     if mode not in ORDER_MODES:
@@ -758,7 +859,7 @@ def read_store(findings: list | None = None) -> dict:
     order: list = []
     seen: set = set()
     for c in as_list(value.get("order")):
-        if isinstance(c, str) and CATEGORY_NAME.match(c) and c in known and c not in seen:
+        if isinstance(c, str) and category_name_ok(c) and c in known and c not in seen:
             seen.add(c)
             order.append(c)
     return {"custom": custom, "assign": assign, "labels": labels, "colors": colors,
@@ -777,7 +878,7 @@ def write_store(store: dict) -> None:
     if mode not in ORDER_MODES:
         mode = DEFAULT_ORDER_MODE
     order = [c for c in as_list(store.get("order"))
-             if isinstance(c, str) and CATEGORY_NAME.match(c)]
+             if isinstance(c, str) and category_name_ok(c)]
     _write_json_store(STORE_PATH, {"version": 1,
                                    "custom": store.get("custom", []),
                                    "assign": store.get("assign", {}),
@@ -826,9 +927,22 @@ def _write_json_store(path: str, payload: dict) -> None:
     if os.path.islink(path):
         raise OSError(errno.ELOOP,
                       f"{tilde(path)} is reached through a symlink, which is not followed")
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    # makedirs leaves a folder that already exists as it found it, and one made
+    # by hand or by an older version is usually 0755: a list of what somebody
+    # filed and wrote about, readable by every account. Narrowed when it is ours.
+    _keep_private(directory)
+    _sweep_stale_tmp(path)
     text = json.dumps(payload, indent=1, sort_keys=True) + "\n"
-    tmp = path + ".tmp.%d" % os.getpid()
+    # A store this program would refuse to read back is a store it has wedged:
+    # every later write is refused as unreadable, the clearing of a note included.
+    if len(text.encode("utf-8")) > MAX_READ:
+        raise OSError(errno.EFBIG, f"{tilde(path)} would be larger than {MAX_READ // (1024 * 1024)} MiB")
+    # Random rather than the pid: a run killed between the open and the rename
+    # leaves its temp behind, and a later run that drew the same pid met its own
+    # name already taken and refused a write nothing was in the way of.
+    tmp = path + ".tmp." + os.urandom(6).hex()
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -848,6 +962,48 @@ def _write_json_store(path: str, payload: dict) -> None:
     # effort: the bytes are already down, and a store that is one crash away from
     # being stale is still better than a refusal for a change that landed.
     _commit_directory(os.path.dirname(path) or ".")
+
+
+def _keep_private(directory: str) -> None:
+    """0700 on this program's own folder, when it is a real folder owned by us."""
+    try:
+        st = os.lstat(directory)
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and st.st_mode & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+# A temp is `<store>.tmp.` and twelve hex digits. Anything older than this is a
+# write that was killed before it could rename or remove its own file.
+_TMP_STALE_SECONDS = 600
+_TMP_SUFFIX = re.compile(r"\.tmp\.[0-9a-f]{1,32}")
+
+
+def _sweep_stale_tmp(path: str) -> None:
+    """Remove this store's own leftover temps, and nothing else.
+
+    Only names this program makes (the store's name, `.tmp.` and hex digits),
+    only regular files of ours, and only ones old enough that no live write can
+    still own them. A link is never followed and never removed.
+    """
+    directory, base = os.path.split(path)
+    try:
+        names = os.listdir(directory or ".")
+    except OSError:
+        return
+    now = time.time()
+    for name in names[:MAX_DIR_ENTRIES]:
+        if not name.startswith(base) or not _TMP_SUFFIX.fullmatch(name[len(base):]):
+            continue
+        stale_tmp = os.path.join(directory, name)
+        try:
+            st = os.lstat(stale_tmp)
+            if (stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+                    and now - st.st_mtime > _TMP_STALE_SECONDS):
+                os.unlink(stale_tmp)
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------- note store
@@ -892,7 +1048,7 @@ def read_describe_store(findings: list | None = None) -> dict:
         return {"notes": {}}
     notes = {}
     for k, v in list(as_dict(value.get("notes")).items())[:MAX_NOTES]:
-        if isinstance(k, str) and isinstance(v, str) and SKILL_NAME.match(k) and v.strip():
+        if isinstance(k, str) and isinstance(v, str) and SKILL_NAME.fullmatch(k) and v.strip():
             notes[k] = clip(v, MAX_NOTE)
     return {"notes": notes}
 
@@ -1212,7 +1368,7 @@ def plugin_skill_roots() -> list[dict]:
             continue
         # `plugin@marketplace`; the invocation namespace is the plugin.
         name = pid.split("@", 1)[0]
-        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
             continue
         market = pid.split("@", 1)[1] if "@" in pid else ""
         for entry in as_list(entries):
@@ -1272,7 +1428,7 @@ def parse_argument_hint(hint) -> list:
         tokens = []
         for piece in re.split(r"[|\u00b7,]", raw):
             piece = piece.strip().strip("*`\"'")
-            if ARG_TOKEN_RE.match(piece) and piece not in tokens:
+            if ARG_TOKEN_RE.fullmatch(piece) and piece not in tokens:
                 tokens.append(piece)
             if len(tokens) >= MAX_ARG_OPTIONS:
                 break
@@ -1342,12 +1498,12 @@ def scan(divisor: int = 4) -> dict:
         findings.append({"what": "claude settings.json", "detail": err})
     overrides = as_dict(as_dict(claude_settings).get("skillOverrides"))
 
-    claude_state, err = read_json(f"{HOME}/.claude.json")
+    claude_state, err = read_json(f"{HOME}/.claude.json", max_bytes=LARGE_STATE_READ)
     if err:
         findings.append({"what": "claude.json", "detail": err})
     usage = as_dict(as_dict(claude_state).get("skillUsage"))
 
-    catalog_cat = _catalog_categories()
+    catalog_cat = _catalog_categories(findings)
     store = read_store(findings)
     descriptions = read_describe_store(findings)
 
@@ -1414,20 +1570,32 @@ def scan(divisor: int = 4) -> dict:
             for path, bundled in targets:
                 if _walk_exhausted(by_real, findings, deadline, tilde(entry.path)):
                     break
-                _ingest(by_real, path, base, root, overrides, usage,
-                        catalog_cat, store, descriptions, divisor, findings, bundled=bundled)
+                try:
+                    _ingest(by_real, path, base, root, overrides, usage,
+                            catalog_cat, store, descriptions, divisor, findings, bundled=bundled)
+                except Exception as exc:  # noqa: BLE001 - one skill is one finding
+                    findings.append({"what": tilde(clip(path, 200)),
+                                     "detail": f"could not be read ({type(exc).__name__})"})
 
     items = list(by_real.values())
     _mark_drift(items)
     items.sort(key=lambda r: (r["taxonomy"]["category"], r["dirName"].lower()))
+    mcp = scan_mcp(findings)
+    plugins = scan_claude_plugins(findings)
+    for item in items:
+        _bound_paths(item)
     return {
         "version": VERSION,
         "generatedAt": int(time.time()),
         "elapsedMs": round((time.monotonic() - started) * 1000, 1),
         "items": items,
-        "mcp": scan_mcp(findings),
-        "plugins": scan_claude_plugins(findings),
-        "findings": findings,
+        "mcp": mcp,
+        "plugins": plugins,
+        # A finding names a path, and a path is whatever somebody called a
+        # directory: an escape sequence, a newline, a megabyte. Bounded once here
+        # rather than at each of the places that append one.
+        "findings": [{"what": clip(f.get("what"), 300), "detail": clip(f.get("detail"), 300)}
+                     for f in findings],
         "counts": _counts(items),
         # Which agents are up right now. The inventory only moves when something
         # is installed; this moves whenever a session starts, and the bar needs
@@ -1451,6 +1619,24 @@ def scan(divisor: int = 4) -> dict:
             "hidePlacedBy": store["hidePlacedBy"],
         },
     }
+
+
+def _plain_path(path) -> bool:
+    """A path the panel may hand to another program exactly as it is: absolute,
+    within PATH_MAX, and without a control character anywhere in it."""
+    return (isinstance(path, str) and path.startswith("/") and len(path) <= 4096
+            and not any(ch < " " or "\x7f" <= ch <= "\x9f" for ch in path))
+
+
+def _bound_paths(item: dict) -> None:
+    """The paths on one record, as they leave this program. The display copies
+    are clipped like any other text. `abs` is the one the panel acts on, and a
+    clipped path names somewhere else, so it goes through whole or not at all."""
+    item["realPath"] = clip(item.get("realPath"), 4096)
+    for mount in item.get("mounts", []):
+        mount["path"] = clip(mount.get("path"), 4096)
+        if not _plain_path(mount.get("abs")):
+            mount["abs"] = None
 
 
 def _walk_exhausted(by_real: dict, findings: list, deadline: float, where: str) -> bool:
@@ -1564,7 +1750,11 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     # frontmatter says what the skill is; this says where you keep it, and the
     # two are allowed to disagree.
     shelved = store["assign"].get(dir_name) or store["assign"].get(display)
-    if shelved:
+    # Only onto a shelf that exists. An assignment to a name that is neither built
+    # in nor one of yours (a hand edit, or a custom list cut at its cap) put the
+    # skill in a category no header draws: under the default grouping it left the
+    # list while the counts went on counting it.
+    if shelved and (shelved in CATEGORIES or shelved in store["custom"]):
         tax = {"category": shelved, "confidence": "authored", "classifier": "you"}
     # A guess is not a fault. These two used to be reported as things needing
     # attention, which put a warning on any skill whose description happened not
@@ -1582,8 +1772,13 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
     note = descriptions["notes"].get(dir_name)
     file_text = clip(description, 1024)
 
-    u = usage.get(dir_name) or usage.get(display) or {}
+    u = as_dict(usage.get(dir_name) or usage.get(display))
     last = u.get("lastUsedAt")
+    if not _finite_number(last):
+        last = None
+    count = u.get("usageCount")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        count = 0
     record = {
         "key": f"skill:{real}",
         "realPath": real,
@@ -1634,7 +1829,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
             # reported as it stands and is never written from here.
             "noteText": note,
         },
-        "usage": {"count": u.get("usageCount", 0), "lastUsedAt": last,
+        "usage": {"count": count,
+                  "lastUsedAt": last,
                   "daysSinceUse": (int((time.time() * 1000 - last) / 86400000) if last else None),
                   "source": "claude.json" if u else "not tracked"},
         "taxonomy": {**tax, "tags": tags_for(display, description),
@@ -1751,14 +1947,20 @@ def _skill_state(dir_name, declared_name, tools, overrides, bundled):
     return state
 
 
-def _catalog_categories() -> dict:
-    data, _ = read_json(f"{HOME}/.claude/plugins/plugin-catalog-cache.json")
+def _catalog_categories(findings: list | None = None) -> dict:
+    data, err = read_json(f"{HOME}/.claude/plugins/plugin-catalog-cache.json",
+                          max_bytes=LARGE_STATE_READ)
+    # Said, because the categories it would have given read as the classifier's
+    # own guesses otherwise, which is a change nobody can see the reason for.
+    if err and findings is not None:
+        findings.append({"what": "plugin-catalog-cache.json", "detail": err})
     out: dict[str, str] = {}
     if not isinstance(data, dict):
         return out
     for entry in as_dict(as_dict(data.get("catalog")).get("plugins")).values():
         me = as_dict(as_dict(entry).get("marketplace_entry"))
-        if me.get("name") and me.get("category"):
+        if isinstance(me.get("name"), str) and isinstance(me.get("category"), str) \
+                and me["name"] and me["category"]:
             out[me["name"]] = me["category"]
     return out
 
@@ -1793,7 +1995,7 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
             "auth": "unknown", "writable": False,
         })
 
-    state, _ = read_json(f"{HOME}/.claude.json")
+    state, _ = read_json(f"{HOME}/.claude.json", max_bytes=LARGE_STATE_READ)
     for name, cfg in as_dict(as_dict(state).get("mcpServers")).items():
         cfg = as_dict(cfg)
         argv = [str(cfg.get("command", ""))] + [str(a) for a in as_list(cfg.get("args"))]
@@ -1821,7 +2023,9 @@ def _opencode_auth(name: str) -> str:
     entry = as_dict(as_dict(data).get(name))
     if not entry:
         return "unknown"
-    expires = as_dict(entry.get("tokens")).get("expiresAt") or 0
+    expires = as_dict(entry.get("tokens")).get("expiresAt")
+    if not _finite_number(expires):
+        return "unknown"
     return "connected" if expires > time.time() else "expired"
 
 
@@ -1837,12 +2041,25 @@ def scan_claude_plugins(findings: list[dict]) -> list[dict]:
             rec = as_dict(rec)
             out.append({
                 "kind": "plugin", "tool": "claude", "name": clip(pid, 128),
-                "version": rec.get("version"), "scope": rec.get("scope", "user"),
-                "enabled": enabled.get(pid, True), "installPath": rec.get("installPath"),
-                "origin": {"type": "marketplace", "installedSha": rec.get("gitCommitSha")},
-                "writable": True,
+                "version": _scalar(rec.get("version"), 64),
+                "scope": _scalar(rec.get("scope"), 32) or "user",
+                "enabled": enabled.get(pid, True) is not False,
+                "installPath": _scalar(rec.get("installPath"), 4096),
+                "origin": {"type": "marketplace",
+                           "installedSha": _scalar(rec.get("gitCommitSha"), 64)},
+                # Nothing here changes a plugin. Claude Code installs, updates and
+                # switches them, and this listing only says what it found.
+                "writable": False,
             })
     return out
+
+
+def _scalar(value, limit: int) -> str | None:
+    """A string or a number from somebody else's JSON, as bounded text; None for
+    anything else, a list or an object being no version and no path."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    return clip(value, limit) or None
 
 
 def _counts(items: list[dict]) -> dict:
@@ -1885,7 +2102,7 @@ def _category_order_command(store: dict, args) -> int:
         order: list = []
         for raw in args.cats:
             name = raw.strip().lower()
-            if not CATEGORY_NAME.match(name):
+            if not category_name_ok(name):
                 warn("a category name is lower case letters, digits and dashes, up to 24")
                 return 2
             if name not in known_set:
@@ -1903,7 +2120,7 @@ def _category_order_command(store: dict, args) -> int:
 
     # move
     name = args.cat.strip().lower()
-    if not CATEGORY_NAME.match(name):
+    if not category_name_ok(name):
         warn("a category name is lower case letters, digits and dashes, up to 24")
         return 2
     if name not in known_set:
@@ -1936,7 +2153,22 @@ def category_command(args) -> int:
     """Every path here either makes the one change it was asked for and says so,
     or changes nothing and says why. There is no partial outcome: the store is
     read, edited in memory, validated, and written whole."""
-    store = read_store()
+    if getattr(args, "stdin", False):
+        if not _take_request(args, args.action, {"assign": ("skill", "category"),
+                                                  "unassign": ("skill",),
+                                                  "create": ("name",),
+                                                  "style": ("name",)}[args.action]):
+            return 2
+    # The same rule `describe` has always had: a store that could not be read
+    # looks exactly like a machine nobody has filed anything on, and the first
+    # change would replace it whole -- with every shelf and every assignment in
+    # it gone. Reading is still allowed; writing over it is not.
+    unread: list = []
+    store = read_store(unread)
+    if unread and args.action != "list" and not (
+            args.action == "order" and args.order_action == "get"):
+        warn(f"{tilde(STORE_PATH)} could not be read ({unread[0]['detail']}); nothing was written")
+        return 2
 
     if args.action == "list":
         sys.stdout.write(json.dumps({"custom": store["custom"], "assign": store["assign"],
@@ -1978,6 +2210,9 @@ def category_command(args) -> int:
         return 0
 
     if args.action == "unassign":
+        if args.skill is None:
+            warn("no skill named")
+            return 1
         skill = clip(args.skill, 128)
         if skill not in store["assign"]:
             warn(f"{skill} was not assigned to anything")
@@ -1989,8 +2224,11 @@ def category_command(args) -> int:
         return 0
 
     if args.action == "create":
+        if args.name is None:
+            warn("no category named")
+            return 1
         name = args.name.strip().lower()
-        if not CATEGORY_NAME.match(name):
+        if not category_name_ok(name):
             warn("a category name is lower case letters, digits and dashes, up to 24")
             return 2
         if name in CATEGORIES:
@@ -2009,6 +2247,9 @@ def category_command(args) -> int:
         return 0
 
     if args.action == "style":
+        if args.name is None:
+            warn("no category named")
+            return 1
         name = args.name.strip().lower()
         if name not in known_categories(store):
             warn(f"{name} is not a category; create it first")
@@ -2032,7 +2273,7 @@ def category_command(args) -> int:
 
     # assign
     skill = args.skill
-    name = args.category.strip().lower()
+    name = (args.category or "").strip().lower()
     if not skill:
         warn("no skill named")
         return 1
@@ -2040,10 +2281,10 @@ def category_command(args) -> int:
     # that had to be tidied up to get through is not the name of any directory,
     # and filing a skill under a name nothing on disk has is a change nobody
     # asked for -- the panel would report the move and the shelf stay empty.
-    if not SKILL_NAME.match(skill):
+    if not SKILL_NAME.fullmatch(skill):
         warn("a skill is named by its directory: anything but a slash, and not . or ..")
         return 2
-    if not CATEGORY_NAME.match(name):
+    if not category_name_ok(name):
         warn("a category name is lower case letters, digits and dashes, up to 24")
         return 2
     if name not in known_categories(store):
@@ -2075,11 +2316,17 @@ def describe_command(args) -> int:
     One line of JSON either way, and either the one change it was asked for or
     nothing at all.
     """
-    skill = args.skill
+    skill, text = args.skill, args.text
+    if args.stdin:
+        if not _take_request(args, "note", ("skill", "text")):
+            return _describe_says(False, "the request on stdin was refused, so nothing was written")
+        skill, text = args.skill, args.text
+    elif skill is None:
+        return _describe_says(False, "name a skill, or pass --stdin")
     # Matched before anything is read or written, and matched rather than
     # cleaned: a name that had to be tidied up to get through is not the name of
     # any directory, and a note filed under one is a note nothing will ever read.
-    if not SKILL_NAME.match(skill):
+    if not SKILL_NAME.fullmatch(skill):
         return _describe_says(False, "a skill is named by its directory: anything but a "
                                      "slash, and not . or ..")
     # An unreadable store says nothing in exactly the way an untouched machine
@@ -2090,7 +2337,7 @@ def describe_command(args) -> int:
         return _describe_says(False, "%s could not be read (%s), so nothing was written"
                                      % (tilde(DESCRIBE_PATH), unread[0]["detail"]))
     try:
-        return _describe_note(store, skill, args.text)
+        return _describe_note(store, skill, text)
     except Exception as exc:  # noqa: BLE001 - the caller is owed one line of JSON, always
         # The panel reads one line and nothing else, so a traceback on stderr and
         # an empty stdout reads to it as a failure it cannot name -- which is what
@@ -2133,54 +2380,7 @@ def _describe_note(store: dict, skill: str, text: str) -> int:
                                 f"read and costs the agents nothing")
 
 
-def _description_in(text: str) -> str:
-    """The description this file text carries, read exactly as the scan reads it.
-
-    Every comparison in this feature is between one of these and another -- what
-    the file says against what we wrote, against what the row was drawn from --
-    so they all go through the one expression rather than three copies of it that
-    could drift apart.
-    """
-    return str(parse_frontmatter(text).get("description") or "").replace("\n", " ").strip()
-
-
-def _current_description(skill_md: str) -> str:
-    """The same, for a file that has not been read yet."""
-    text = read_text(skill_md)
-    return "" if text is None else _description_in(text)
-
-
-def _links_first(paths: list[str]) -> list[str]:
-    """Links before the directories they point at, whatever order they arrived in.
-
-    The scan already orders `removal.targets` this way and the panel passes them
-    through, but the guarantee belongs here too: removing a real directory while
-    a link from another root survives takes the row off the next scan entirely,
-    which leaves a dangling link and nothing left to click on. Stable, so paths
-    that sort the same keep the order the caller chose.
-    """
-    return sorted(paths, key=lambda p: not os.path.islink(p))
-
-
-# ------------------------------------------------------ writing a description
-#
-# The acting half of the store above, and the only place this program changes a
-# file somebody else wrote. What makes that defensible is how little it changes:
-# the value of the `description:` key and nothing else. The body, every other
-# key, the blank lines and the order they sit in all come through by slicing the
-# text around that one value, because re-serialising the frontmatter through any
-# writer would reformat a file whose shape was never ours to choose.
-
-# What a plain scalar may not be if it is to read back as the text it was given.
-# The first-character set is YAML's indicators; `: ` and ` #` end a plain scalar
-# in the middle of a line; and a word a reader takes for a boolean or a number
-# comes back as a value of the wrong type rather than as a short description.
-# Both the 1.1 and 1.2 spellings are here, because the three agents do not all
-# parse with the same library and the answer to write is the one nobody argues
-# about.
-YAML_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
-YAML_KEYWORDS = {"true", "false", "yes", "no", "on", "off", "null", "~"}
-
+# ------------------------------------------------------ durable rename
 
 def _commit_directory(directory: str) -> str:
     """Make the rename itself survive a power cut, not just the bytes it renamed.
@@ -2206,10 +2406,6 @@ def _commit_directory(directory: str) -> str:
     return ""
 
 
-def _frontmatter_besides_description(text: str) -> dict:
-    return {k: v for k, v in parse_frontmatter(text).items() if k != "description"}
-
-
 def _apply_style(store: dict, name: str, label, color) -> bool:
     """Both fields or neither. A half-applied restyle would leave the store
     saying one thing and the screen another, and the caller has no way to tell
@@ -2218,7 +2414,7 @@ def _apply_style(store: dict, name: str, label, color) -> bool:
         label = label.strip()
         if label == "":
             store["labels"].pop(name, None)
-        elif CATEGORY_LABEL.match(label):
+        elif CATEGORY_LABEL.fullmatch(label):
             store["labels"][name] = clip(label, 32)
         else:
             warn("a label is one line, up to 32 characters")
@@ -2227,7 +2423,7 @@ def _apply_style(store: dict, name: str, label, color) -> bool:
         color = color.strip()
         if color == "":
             store["colors"].pop(name, None)
-        elif HEX_COLOR.match(color):
+        elif HEX_COLOR.fullmatch(color):
             store["colors"][name] = color.upper()
         else:
             warn("a colour is #RRGGBB")
@@ -2254,21 +2450,29 @@ def main(argv: list[str]) -> int:
     cat_sub = p_cat.add_subparsers(dest="action", required=True)
 
     p_assign = cat_sub.add_parser("assign", help="move one skill into a category")
-    p_assign.add_argument("skill", help="the skill's directory name")
-    p_assign.add_argument("category", help="an existing category, or a new one with --create")
+    p_assign.add_argument("skill", nargs="?", help="the skill's directory name")
+    p_assign.add_argument("category", nargs="?", help="an existing category, or a new one with --create")
+    p_assign.add_argument("--stdin", action="store_true",
+                          help='read {"skill","category","create"} as one JSON object on stdin')
     p_assign.add_argument("--create", action="store_true",
                           help="create the category first if it does not exist")
 
     p_unassign = cat_sub.add_parser("unassign", help="give a skill back to the classifier")
-    p_unassign.add_argument("skill")
+    p_unassign.add_argument("skill", nargs="?")
+    p_unassign.add_argument("--stdin", action="store_true",
+                            help='read {"skill"} as one JSON object on stdin')
 
     p_create = cat_sub.add_parser("create", help="add a category of your own")
-    p_create.add_argument("name", help="lower case, digits and dashes, 24 characters")
+    p_create.add_argument("name", nargs="?", help="lower case, digits and dashes, 24 characters")
+    p_create.add_argument("--stdin", action="store_true",
+                          help='read {"name","label","color"} as one JSON object on stdin')
     p_create.add_argument("--label", default=None, help="how it reads in a group header")
     p_create.add_argument("--color", default=None, help="#RRGGBB")
 
     p_style = cat_sub.add_parser("style", help="rename or recolour any category")
-    p_style.add_argument("name")
+    p_style.add_argument("name", nargs="?")
+    p_style.add_argument("--stdin", action="store_true",
+                         help='read {"name","label","color","reset"} as one JSON object on stdin')
     p_style.add_argument("--label", default=None)
     p_style.add_argument("--color", default=None)
     p_style.add_argument("--reset", action="store_true",
@@ -2306,7 +2510,9 @@ def main(argv: list[str]) -> int:
 
     p_note = desc_sub.add_parser("note", help="your own words about a skill, shown above its "
                                               "description and read by no agent")
-    p_note.add_argument("skill", help="the skill's directory name")
+    p_note.add_argument("skill", nargs="?", help="the skill's directory name")
+    p_note.add_argument("--stdin", action="store_true",
+                        help='read {"skill","text"} as one JSON object on stdin')
     p_note.add_argument("text", nargs="?", default="",
                         help=f"the note, up to {MAX_NOTE} characters; leave it out to "
                              f"clear the one that is there")
@@ -2322,7 +2528,10 @@ def main(argv: list[str]) -> int:
     if args.cmd == "scan":
         result = scan(divisor=args.divisor)
         payload = json.dumps(result, indent=2 if args.pretty else None, ensure_ascii=False)
-        if len(payload.encode("utf-8")) > MAX_OUTPUT:
+        # Bytes, with `replace`: a directory name is bytes on disk and need not be
+        # UTF-8, and one that is not used to end the whole scan in a traceback.
+        encoded = payload.encode("utf-8", "replace")
+        if len(encoded) > MAX_OUTPUT:
             # Refuse rather than emit a truncated document the reader would parse
             # as a whole one. The caller gets a valid, small, honest answer.
             warn(f"scan output exceeded {MAX_OUTPUT} bytes; refusing to emit it")
@@ -2334,7 +2543,9 @@ def main(argv: list[str]) -> int:
             }, ensure_ascii=False)
             sys.stdout.write(payload + "\n")
             return 2
-        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+        sys.stdout.buffer.write(encoded + b"\n")
+        sys.stdout.buffer.flush()
         return 0
 
     if args.cmd == "doctor":
@@ -2353,8 +2564,11 @@ def main(argv: list[str]) -> int:
                                           key=lambda kv: -kv[1])))
         if result["findings"]:
             print(f"\nneeds attention   {len(result['findings'])}")
+            # Already clipped by scan(), and clip() drops every control
+            # character, so a directory named with an escape sequence prints as
+            # text rather than reaching the terminal as a command.
             for f in result["findings"]:
-                print(f"  {f['what']}: {f['detail']}")
+                print(f"  {clip(f['what'], 300)}: {clip(f['detail'], 300)}")
         return 0
 
     return 1

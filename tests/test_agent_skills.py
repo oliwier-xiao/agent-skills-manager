@@ -3,14 +3,17 @@
 Run: python3 -m unittest discover -s tests -v
 """
 import contextlib
+import errno
 import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -288,6 +291,7 @@ class RunningAgents(unittest.TestCase):
 
     def _fake_proc(self, comms):
         root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
         for pid, comm in comms.items():
             os.mkdir(os.path.join(root, str(pid)))
             with open(os.path.join(root, str(pid), "comm"), "w", encoding="utf-8") as fh:
@@ -1810,8 +1814,11 @@ class ReadOnlyOverEverythingElse(unittest.TestCase):
             path = os.path.join(root, "SKILL.md")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("---\nname: alpha\ndescription: The author's own.\n---\n\nBody.\n")
+            def contents(path):
+                with open(path, "rb") as fh:
+                    return fh.read()
             before = {p: (os.stat(os.path.join(dp, p)).st_mtime_ns,
-                          open(os.path.join(dp, p), "rb").read())
+                          contents(os.path.join(dp, p)))
                       for dp, _, fs in os.walk(home) for p in fs}
             saved = ax.HOME
             try:
@@ -1820,7 +1827,7 @@ class ReadOnlyOverEverythingElse(unittest.TestCase):
             finally:
                 ax.HOME = saved
             after = {p: (os.stat(os.path.join(dp, p)).st_mtime_ns,
-                         open(os.path.join(dp, p), "rb").read())
+                         contents(os.path.join(dp, p)))
                      for dp, _, fs in os.walk(home) for p in fs}
             self.assertEqual(before, after)
 
@@ -1978,6 +1985,585 @@ class CategoryOrderTest(unittest.TestCase):
         self.assertEqual(store["order"][:3], ["web", "code", "agents"])
         self.assertEqual(store["orderMode"], "custom")
         self.assertEqual(store["assign"], {"nextjs": "web"})
+
+
+class PanelForwardsWhatTheHelperReads(unittest.TestCase):
+    """The panel clears the environment before it starts the helper, so every
+    variable the helper reads to find what OpenCode loads has to be put back by
+    name, or the panel reports on a different disk from the one OpenCode reads.
+
+    Through 1.1.0 one of the seven was put back while the README promised all of
+    them. Read off the source rather than listed here, so a variable the helper
+    starts reading tomorrow fails this until the panel forwards it too.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(self, *parts):
+        with open(os.path.join(self.ROOT, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def forwarded(self):
+        panel = self.read("Panel.qml")
+        m = re.search(r"forwardedEnvironment:\s*\[(.*?)\]", panel, re.S)
+        self.assertIsNotNone(m, "Panel.qml lost its forwardedEnvironment list")
+        return set(re.findall(r'"([A-Z_]+)"', m.group(1)))
+
+    def test_every_variable_the_helper_reads_is_forwarded(self):
+        helper = self.read("bin", "agent-skills")
+        read = set(re.findall(r'os\.environ\.get\(\s*"([A-Z_]+)"', helper))
+        read |= set(re.findall(r'_xdg_dir\(\s*"([A-Z_]+)"', helper))
+        # The parse has to have found something for the comparison to mean anything.
+        self.assertTrue({"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG_CONTENT"} <= read, read)
+        self.assertEqual(read - self.forwarded() - {"HOME", "PATH"}, set())
+
+    def test_every_variable_the_readme_promises_is_forwarded(self):
+        readme = self.read("README.md")
+        promised = set(re.findall(r"`((?:XDG|OPENCODE)_[A-Z_]+)`", readme))
+        self.assertTrue(promised, "the README table of variables is gone")
+        self.assertEqual(promised - self.forwarded(), set())
+
+    def test_only_the_scan_is_handed_that_environment(self):
+        # The writers read none of it, and OPENCODE_CONFIG_CONTENT can be a whole
+        # config with provider keys in it.
+        panel = self.read("Panel.qml")
+        self.assertEqual(panel.count("environment = root.scanEnvironment()"), 1)
+        self.assertEqual(panel.count("proc.environment = root.baseEnvironment()"), 1)
+        self.assertEqual(panel.count("clearEnvironment = true"), 3)
+        code = "\n".join(line for line in panel.split("\n") if not line.lstrip().startswith("//"))
+        self.assertEqual(code.count("OPENCODE_CONFIG_CONTENT"), 1,
+                         "outside the forwarded list it would reach some other process")
+        base = re.search(r"function baseEnvironment\(\) \{(.*?)\n  \}", panel, re.S)
+        self.assertIsNotNone(base)
+        self.assertNotIn("OPENCODE", base.group(1))
+        self.assertNotIn("forwardedEnvironment", base.group(1))
+
+    def test_an_empty_home_is_left_out_rather_than_passed(self):
+        # Python reads HOME="" as "/", and the store would be looked for in /.config.
+        panel = self.read("Panel.qml")
+        base = re.search(r"function baseEnvironment\(\) \{(.*?)\n  \}", panel, re.S).group(1)
+        self.assertIn('if (root.homeDir !== "") env["HOME"] = root.homeDir', base)
+        self.assertNotIn('"HOME": root.homeDir', panel)
+
+
+# --------------------------------------------------------------- 1.1.1 review
+
+HELPER = os.path.join(ROOT, "bin", "agent-skills")
+
+
+def run_helper(home, *argv, stdin=b"", timeout=30):
+    """The helper as the panel starts it: /usr/bin/python3 on the script, a
+    cleared environment with HOME, PATH and PYTHONIOENCODING, and a request on
+    stdin. Out of process, because what is being tested is what reaches fd 0."""
+    import subprocess  # the tests may start the helper; the helper starts nothing
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
+    proc = subprocess.run([sys.executable, "-B", HELPER, *argv], input=stdin, env=env,
+                          capture_output=True, timeout=timeout, check=False)
+    return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")
+
+
+class StdinHome(unittest.TestCase):
+    """A throwaway HOME holding one skill and nothing else."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        skill = os.path.join(self.home, ".claude", "skills", "plain")
+        os.makedirs(skill)
+        with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: plain\ndescription: A plain skill.\n---\n")
+        self.store_dir = os.path.join(self.home, ".config", "agent-skills")
+
+    def store(self, name="categories.json"):
+        with open(os.path.join(self.store_dir, name), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def send(self, *argv, request):
+        data = request if isinstance(request, bytes) else json.dumps(request).encode("utf-8")
+        return run_helper(self.home, *argv, stdin=data)
+
+
+class WritesTakeTheirChangeOnStdin(StdinHome):
+    """What a person typed, and what a stranger named a directory, reach the
+    helper on stdin. In argv they were in /proc/<pid>/cmdline for every account."""
+
+    def test_a_note_arrives_whole_and_is_stored(self):
+        text = "my private note: password hunter2, ściągnięte"
+        code, out, _ = self.send("describe", "note", "--stdin", request={"skill": "plain", "text": text})
+        self.assertEqual(code, 0, out)
+        self.assertTrue(json.loads(out)["ok"])
+        self.assertEqual(self.store("descriptions.json")["notes"]["plain"], text)
+
+    def test_names_and_text_that_look_like_options_are_only_strings(self):
+        # Through argv, a label of --wip was refused and a note of -- was dropped
+        # while the panel reported it saved.
+        code, out, _ = self.send("describe", "note", "--stdin", request={"skill": "-h", "text": "--"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.store("descriptions.json")["notes"]["-h"], "--")
+        code, _, err = self.send("category", "create", "--stdin",
+                                 request={"name": "team", "label": None, "color": None})
+        self.assertEqual(code, 0, err)
+        code, _, err = self.send("category", "style", "--stdin",
+                                 request={"name": "team", "label": "--wip", "color": "#7AA2F7",
+                                          "reset": False})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store()["labels"]["team"], "--wip")
+        self.assertEqual(self.store()["colors"]["team"], "#7AA2F7")
+
+    def test_assign_and_unassign(self):
+        code, _, err = self.send("category", "assign", "--stdin",
+                                 request={"skill": "data  science", "category": "fresh", "create": True})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store()["assign"], {"data  science": "fresh"})
+        self.assertIn("fresh", self.store()["custom"])
+        code, _, err = self.send("category", "unassign", "--stdin", request={"skill": "data  science"})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.store()["assign"], {})
+
+    def test_every_malformed_request_is_refused_and_nothing_is_written(self):
+        canary = "CANARY-7f3a"
+        cases = [
+            b"",
+            b"{",
+            b"[" * 5000,
+            b"\xff\xfe" + canary.encode(),
+            json.dumps({"skill": "plain", "text": canary, "extra": 1}).encode(),
+            json.dumps({"skill": "plain"}).encode(),
+            json.dumps({"skill": ["plain"], "text": canary}).encode(),
+            json.dumps({"skill": "plain", "text": canary * 3000}).encode(),
+            json.dumps(["plain", canary]).encode(),
+            json.dumps({"skill": "plain\n", "text": canary}).encode(),
+            json.dumps({"skill": "..", "text": canary}).encode(),
+        ]
+        for data in cases:
+            code, out, err = run_helper(self.home, "describe", "note", "--stdin", stdin=data)
+            self.assertEqual(code, 2, data[:60])
+            # The refusal names the rule and never repeats what was sent.
+            self.assertNotIn(canary, out + err)
+        self.assertFalse(os.path.exists(os.path.join(self.store_dir, "descriptions.json")))
+
+    def test_a_request_for_another_verb_is_refused(self):
+        code, _, _ = self.send("category", "assign", "--stdin",
+                               request={"skill": "plain", "text": "a note"})
+        self.assertEqual(code, 2)
+        code, _, _ = self.send("category", "style", "--stdin",
+                               request={"name": "web", "label": "x", "color": None, "reset": "no"})
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.store_dir, "categories.json")))
+
+    def test_stdin_and_a_positional_together_are_refused(self):
+        code, _, _ = self.send("describe", "note", "--stdin", "plain",
+                               request={"skill": "plain", "text": "x"})
+        self.assertEqual(code, 2)
+        code, _, _ = self.send("category", "unassign", "--stdin", "plain", request={"skill": "plain"})
+        self.assertEqual(code, 2)
+
+
+class ReadRequest(unittest.TestCase):
+    """The bounded reader itself, on a pipe of its own."""
+
+    def read(self, data, close=True):
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        if data:
+            os.write(w, data)
+        if close:
+            os.close(w)
+        else:
+            self.addCleanup(os.close, w)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            return ax.read_request({"skill": str}, fd=r), err.getvalue()
+
+    def test_a_stdin_that_is_never_closed_is_given_up_on(self):
+        saved = ax.REQUEST_SECONDS
+        ax.REQUEST_SECONDS = 0.3
+        try:
+            started = time.monotonic()
+            value, err = self.read(b'{"skill": "plain"}', close=False)
+        finally:
+            ax.REQUEST_SECONDS = saved
+        self.assertIsNone(value)
+        self.assertIn("in time", err)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_exactly_the_cap_is_read_and_one_byte_more_is_not(self):
+        body = b'{"skill": "' + b"a" * (ax.MAX_REQUEST - 13) + b'"}'
+        self.assertEqual(len(body), ax.MAX_REQUEST)
+        value, _ = self.read(body)
+        self.assertEqual(value, {"skill": "a" * (ax.MAX_REQUEST - 13)})
+        value, err = self.read(body + b" ")
+        self.assertIsNone(value)
+        self.assertIn("larger than", err)
+
+    def test_a_good_request(self):
+        self.assertEqual(self.read(b'{"skill": "plain"}')[0], {"skill": "plain"})
+
+
+class PanelSendsTheChangeOnStdin(unittest.TestCase):
+    """Read off Panel.qml, since nothing here can run Quickshell."""
+
+    def setUp(self):
+        with open(os.path.join(ROOT, "Panel.qml"), encoding="utf-8") as fh:
+            self.panel = fh.read()
+
+    def block(self, opener):
+        start = self.panel.index(opener)
+        depth = 0
+        for i in range(start, len(self.panel)):
+            if self.panel[i] == "{":
+                depth += 1
+            elif self.panel[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.panel[start:i + 1]
+        self.fail("unbalanced " + opener)
+
+    def test_every_verb_that_carries_a_name_or_text_uses_stdin(self):
+        for verb in ("assign", "unassign", "create", "style"):
+            for m in re.finditer(r'runCategory\(\["%s"([^\]]*)\]' % verb, self.panel):
+                self.assertEqual(m.group(1), ', "--stdin"', m.group(0))
+        self.assertIn('argv: ["note", "--stdin"]', self.panel)
+        self.assertNotIn('["note", "--"', self.panel)
+        self.assertNotRegex(self.panel, r'runCategory\(\[[^\]]*"--",')
+
+    def test_stdin_is_opened_before_every_start_and_closed_after_the_write(self):
+        start = self.block("function startHelper(")
+        self.assertIn("proc.stdinText = ", start)
+        self.assertIn("JSON.stringify(request)", start)
+        self.assertLess(start.index("proc.stdinEnabled = true"), start.index("proc.running = true"))
+        for proc in ("catProc", "describeProc", "clipProc"):
+            started = self.block("Process {\n    id: %s" % proc)
+            started = started[started.index("onStarted: {"):]
+            self.assertIn("%s.write(%s.stdinText)" % (proc, proc), started)
+            self.assertIn("%s.stdinEnabled = false" % proc, started)
+
+    def test_the_clipboard_fallback_is_wl_copy_reading_stdin(self):
+        self.assertNotIn('execArgv(["wl-copy"', self.panel)
+        self.assertIn('command: ["/usr/bin/wl-copy", "--type", "text/plain"]', self.panel)
+        copy = self.block("function copyThroughWlCopy(")
+        self.assertIn("clipProc.clearEnvironment = true", copy)
+        self.assertIn("clipProc.stdinEnabled = true", copy)
+
+    def test_the_update_prompt_quotes_everything_it_read(self):
+        prompt = self.block("function updatePromptFor(")
+        for field in ("f.name", "f.file", "f.version", "f.hash"):
+            self.assertIn("root.quoted(%s)" % field, prompt)
+            self.assertNotRegex(prompt, r"\+ %s\b" % re.escape(field))
+        facts = self.block("function updateFactsFor(")
+        self.assertIn('file: root.clean(root.tildify(String(item.realPath || "")) + "/SKILL.md", 300)', facts)
+        self.assertIn("data read from files on this machine", prompt)
+
+    def test_the_file_manager_gets_the_path_on_disk(self):
+        self.assertIn("abs: root.plainPath(src[m].abs)", self.panel)
+        self.assertNotIn("abs: root.clean(", self.panel)
+
+    def test_the_scan_wrapper_and_its_deadline(self):
+        script = self.panel[self.panel.index("readonly property string scanScript:"):]
+        script = script[:script.index("\n\n")]
+        self.assertLess(script.index('"set +m\\n"'), script.index('"wait %1\\n"'))
+        timeout = int(re.search(r"scanTimeoutMs: (\d+)", self.panel).group(1))
+        self.assertGreater(timeout, ax.DEADLINE_SECONDS * 1000)
+        self.assertIn("if (scanProc.running) { root.rescanQueued = true; return }", self.panel)
+
+
+class WritersNeedOnlyHome(StdinHome):
+    """Every writing verb works with HOME as the whole environment, and asks for
+    no other variable: what the panel hands the writers is all they read."""
+
+    def test_no_writer_asks_for_another_variable(self):
+        from unittest import mock
+
+        class Recording(dict):
+            asked = set()
+
+            def get(self, key, default=None):
+                Recording.asked.add(key)
+                return super().get(key, default)
+
+            def __getitem__(self, key):
+                Recording.asked.add(key)
+                return super().__getitem__(key)
+
+            def __contains__(self, key):
+                Recording.asked.add(key)
+                return super().__contains__(key)
+
+        saved = {name: getattr(ax, name) for name in ("HOME", "STORE_DIR", "STORE_PATH", "DESCRIBE_PATH")}
+        self.addCleanup(lambda: [setattr(ax, k, v) for k, v in saved.items()])
+        ax.HOME = self.home
+        ax.STORE_DIR = self.store_dir
+        ax.STORE_PATH = os.path.join(self.store_dir, "categories.json")
+        ax.DESCRIBE_PATH = os.path.join(self.store_dir, "descriptions.json")
+        verbs = [["category", "create", "--", "team"],
+                 ["category", "assign", "--", "plain", "team"],
+                 ["category", "style", "--label", "Team", "--", "team"],
+                 ["category", "order", "move", "team", "0"],
+                 ["category", "sort-mode", "custom"],
+                 ["category", "placed-by", "hide"],
+                 ["category", "unassign", "--", "plain"],
+                 ["category", "list"],
+                 ["describe", "note", "--", "plain", "a note"]]
+        with mock.patch.object(os, "environ", Recording({"HOME": self.home})):
+            for argv in verbs:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(ax.main(argv), 0, argv)
+        # argparse asks gettext for the locale and the terminal for its width;
+        # those are the standard library's, and none of them moves a file.
+        stdlib = {"LANG", "LANGUAGE", "LC_ALL", "LC_MESSAGES", "COLUMNS", "LINES"}
+        self.assertLessEqual(Recording.asked - stdlib, {"HOME"})
+        helper_reads = set(REDIRECTING_VARS) | {"OPENCODE_DISABLE_EXTERNAL_SKILLS"}
+        self.assertEqual(Recording.asked & helper_reads, set())
+
+
+class OneOddValueDoesNotEndTheScan(unittest.TestCase):
+    """Each of these ended the whole scan with nothing printed."""
+
+    def test_a_directory_name_that_is_not_utf8(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        skill = os.path.join(os.fsencode(home), b".claude", b"skills", b"caf\xe9")
+        os.makedirs(skill)
+        with open(os.path.join(skill, b"SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: cafe\ndescription: Latin-1 on disk.\n---\n")
+        code, out, err = run_helper(home, "scan")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(json.loads(out)["items"]), 1)
+
+    def test_bad_types_in_claude_json_and_the_catalog(self):
+        def build(home):
+            for name in ("plain", "other"):
+                skill = os.path.join(home, ".claude", "skills", name)
+                os.makedirs(skill)
+                with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as fh:
+                    fh.write("---\nname: %s\ndescription: A plain skill.\n---\n" % name)
+            with open(os.path.join(home, ".claude.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"skillUsage": {"plain": {"usageCount": true, "lastUsedAt": 1e400}, '
+                         '"other": "not an object"}}')
+            plugins = os.path.join(home, ".claude", "plugins")
+            os.makedirs(plugins)
+            with open(os.path.join(plugins, "plugin-catalog-cache.json"), "w", encoding="utf-8") as fh:
+                json.dump({"catalog": {"plugins": {"x": {"marketplace_entry":
+                                                         {"name": ["plain"], "category": {}}}}}}, fh)
+        result = scan_with_home(build)
+        usage = {i["dirName"]: i["usage"] for i in result["items"]}
+        self.assertEqual(set(usage), {"plain", "other"})
+        self.assertEqual(usage["plain"]["count"], 0)
+        self.assertIsNone(usage["plain"]["lastUsedAt"])
+        self.assertIsNone(usage["plain"]["daysSinceUse"])
+        self.assertEqual(usage["other"]["source"], "not tracked")
+
+    def test_a_token_expiry_that_is_not_a_number(self):
+        with tempfile.TemporaryDirectory() as data:
+            os.makedirs(os.path.join(data, "opencode"))
+            with open(os.path.join(data, "opencode", "mcp-auth.json"), "w", encoding="utf-8") as fh:
+                json.dump({"a": {"tokens": {"expiresAt": "tomorrow"}},
+                           "b": {"tokens": {"expiresAt": 1e400}},
+                           "c": {"tokens": {"expiresAt": True}}}, fh)
+            with env_without_redirects(XDG_DATA_HOME=data):
+                self.assertEqual(ax._opencode_auth("a"), "unknown")
+                self.assertEqual(ax._opencode_auth("b"), "unknown")
+                self.assertEqual(ax._opencode_auth("c"), "unknown")
+
+    def test_a_skill_that_cannot_be_read_is_one_finding(self):
+        saved = ax._ingest
+        def boom(*a, **k):
+            raise TypeError("shape")
+        ax._ingest = boom
+        try:
+            result = scan_with_home(lambda h: os.makedirs(os.path.join(h, ".claude", "skills", "x")))
+        finally:
+            ax._ingest = saved
+        self.assertEqual(result["items"], [])
+        self.assertTrue(any("could not be read (TypeError)" in f["detail"] for f in result["findings"]))
+
+
+class RedactsSecretFlagsWithAPrefix(unittest.TestCase):
+    def test_two_argument_spellings(self):
+        for flag in ("--github-token", "--client-secret", "--slack-bot-token", "--access-token",
+                     "--private-key", "--bearer-token", "--x-api-key", "--cookie", "--credentials",
+                     "--db-password", "--passwd"):
+            shown = ax.redact_argv(["npx", "server", flag, "SECRET-VALUE-1"])
+            self.assertNotIn("SECRET-VALUE-1", shown, flag)
+
+    def test_what_is_not_a_secret_stays(self):
+        for argv in (["npx", "server", "--host", "example.org"],
+                     ["node", "/home/u/authors/server.js"]):
+            self.assertEqual(ax.redact_argv(argv), " ".join(argv))
+
+
+class StoresThatCannotBeReadAreNotWrittenOver(DescribeCase):
+
+    def corrupt(self, text='{"custom": ["mine"], "assign": {"plain": "mine"}} trailing'):
+        os.makedirs(ax.STORE_DIR, exist_ok=True)
+        with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return self.raw(ax.STORE_PATH)
+
+    def run_verb(self, *argv):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return ax.main(list(argv))
+
+    def test_every_category_write_refuses_and_list_still_reads(self):
+        before = self.corrupt()
+        for argv in (["category", "assign", "--", "other", "web"],
+                     ["category", "create", "--", "fresh"],
+                     ["category", "style", "--label", "X", "--", "web"],
+                     ["category", "unassign", "--", "plain"],
+                     ["category", "order", "move", "web", "0"],
+                     ["category", "sort-mode", "custom"],
+                     ["category", "placed-by", "hide"]):
+            self.assertEqual(self.run_verb(*argv), 2, argv)
+            self.assertEqual(self.raw(ax.STORE_PATH), before, argv)
+        self.assertEqual(self.run_verb("category", "list"), 0)
+
+    def test_a_store_that_would_be_too_large_to_read_back_is_not_written(self):
+        self.plain()
+        self.assertEqual(self.note("plain", "first")[0], 0)
+        before = self.raw(ax.DESCRIBE_PATH)
+        store = ax.read_describe_store()
+        for i in range(1200):
+            store["notes"]["skill-%d" % i] = "ś" * 1024
+        with self.assertRaises(OSError) as raised:
+            ax.write_describe_store(store)
+        self.assertEqual(raised.exception.errno, errno.EFBIG)
+        self.assertEqual(self.raw(ax.DESCRIBE_PATH), before)
+        self.assertEqual([n for n in os.listdir(ax.STORE_DIR) if ".tmp." in n], [])
+
+
+class TheStoreFolder(DescribeCase):
+
+    def test_an_existing_open_folder_is_made_private(self):
+        os.makedirs(ax.STORE_DIR)
+        os.chmod(ax.STORE_DIR, 0o755)
+        self.plain()
+        self.assertEqual(self.note("plain", "mine")[0], 0)
+        self.assertEqual(stat.S_IMODE(os.stat(ax.STORE_DIR).st_mode), 0o700)
+
+    def test_a_killed_writes_temp_is_swept_and_nothing_else(self):
+        os.makedirs(ax.STORE_DIR)
+        old = os.path.join(ax.STORE_DIR, "descriptions.json.tmp.4242")
+        young = os.path.join(ax.STORE_DIR, "descriptions.json.tmp.abcdef012345")
+        other = os.path.join(ax.STORE_DIR, "descriptions.json.tmp.notours")
+        target = os.path.join(self.home, "elsewhere")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("keep")
+        linked = os.path.join(ax.STORE_DIR, "descriptions.json.tmp.0123456789ab")
+        for path in (old, young, other):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        os.symlink(target, linked)
+        long_ago = time.time() - 7200
+        os.utime(old, (long_ago, long_ago))
+        os.utime(other, (long_ago, long_ago))
+        os.utime(linked, (long_ago, long_ago), follow_symlinks=False)
+        self.plain()
+        self.assertEqual(self.note("plain", "mine")[0], 0)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(young))
+        self.assertTrue(os.path.exists(other))
+        self.assertTrue(os.path.islink(linked))
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "keep")
+
+    def test_temp_names_are_not_the_pid(self):
+        self.assertNotIn("getpid", inspect_source(ax._write_json_store))
+
+
+def inspect_source(fn):
+    import inspect
+    try:
+        return inspect.getsource(fn)
+    except (OSError, TypeError):
+        with open(HELPER, encoding="utf-8") as fh:
+            text = fh.read()
+        start = text.index("def " + fn.__name__)
+        end = text.find("\ndef ", start + 1)
+        return text[start:end]
+
+
+class ShelvesThatExist(unittest.TestCase):
+
+    def test_an_assignment_to_a_shelf_that_does_not_exist_goes_back_to_the_classifier(self):
+        def build(home):
+            skill = os.path.join(home, ".claude", "skills", "plain")
+            os.makedirs(skill)
+            with open(os.path.join(skill, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: plain\ndescription: A plain skill.\n---\n")
+            with open(os.path.join(home, "categories.json"), "w", encoding="utf-8") as fh:
+                json.dump({"custom": [], "assign": {"plain": "ghost"}}, fh)
+        item = scan_with_home(build)["items"][0]
+        self.assertNotEqual(item["taxonomy"]["category"], "ghost")
+        self.assertNotEqual(item["taxonomy"]["classifier"], "you")
+
+    def test_constructor_is_no_shelf_name(self):
+        self.assertFalse(ax.category_name_ok("constructor"))
+        self.assertTrue(ax.category_name_ok("constructors"))
+        self.assertFalse(ax.category_name_ok("web\n"))
+        with tempfile.TemporaryDirectory() as d:
+            saved = ax.STORE_PATH
+            ax.STORE_PATH = os.path.join(d, "categories.json")
+            try:
+                with open(ax.STORE_PATH, "w", encoding="utf-8") as fh:
+                    json.dump({"custom": ["constructor", "mine"], "assign": {"a": "constructor"}}, fh)
+                store = ax.read_store()
+            finally:
+                ax.STORE_PATH = saved
+        self.assertEqual(store["custom"], ["mine"])
+        self.assertEqual(store["assign"], {})
+
+
+class WhatLeavesTheHelperIsBounded(unittest.TestCase):
+
+    def test_findings_and_paths_carry_no_control_characters(self):
+        nasty = "evil\x1b]0;PWNED\x07\x1b[31mred\x9b2J"
+
+        def build(home):
+            os.makedirs(os.path.join(home, ".claude", "skills", nasty))
+            ok = os.path.join(home, ".claude", "skills", "bad\nline")
+            os.makedirs(ok)
+            with open(os.path.join(ok, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: bad\ndescription: A newline in its directory.\n---\n")
+        result = scan_with_home(build)
+        for f in result["findings"]:
+            for value in f.values():
+                self.assertFalse(any(c < " " or "\x7f" <= c <= "\x9f" for c in value), repr(value))
+        item = result["items"][0]
+        self.assertNotIn("\n", item["realPath"])
+        for mount in item["mounts"]:
+            self.assertIsNone(mount["abs"])
+            self.assertNotIn("\n", mount["path"])
+
+    def test_doctor_prints_no_escape_sequence(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        os.makedirs(os.path.join(home, ".claude", "skills", "evil\x1b]0;PWNED\x07\x1b[31m"))
+        code, out, err = run_helper(home, "doctor")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+
+    def test_plugin_fields_are_bounded_text(self):
+        def build(home):
+            plugins = os.path.join(home, ".claude", "plugins")
+            os.makedirs(plugins)
+            with open(os.path.join(plugins, "installed_plugins.json"), "w", encoding="utf-8") as fh:
+                json.dump({"plugins": {"p@m": [{"version": ["1"], "scope": "x" * 100,
+                                                "installPath": "/p" * 10000,
+                                                "gitCommitSha": {"a": 1}}]}}, fh)
+        plugin = scan_with_home(build)["plugins"][0]
+        self.assertIsNone(plugin["version"])
+        self.assertLessEqual(len(plugin["scope"]), 32)
+        self.assertLessEqual(len(plugin["installPath"]), 4096)
+        self.assertIsNone(plugin["origin"]["installedSha"])
+        self.assertFalse(plugin["writable"])
+
+
+class TheRemovedWriterLeftNothing(unittest.TestCase):
+    def test_its_helpers_are_gone(self):
+        for gone in ("_description_in", "_current_description", "_links_first", "YAML_INDICATORS",
+                     "YAML_KEYWORDS", "_frontmatter_besides_description"):
+            self.assertFalse(hasattr(ax, gone), gone)
 
 
 if __name__ == "__main__":

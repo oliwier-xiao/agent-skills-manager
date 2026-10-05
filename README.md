@@ -101,6 +101,11 @@ environment, and the panel follows rather than guessing:
 | `XDG_CACHE_HOME` · `XDG_DATA_HOME` | move the fetched-skills root and the MCP token file |
 | `OPENCODE_CONFIG` · `OPENCODE_CONFIG_CONTENT` | each merge a further configuration in |
 
+They reach the scan, which is the only part that reads them, and only through its environment,
+which no other account can read. The two writes below get `PATH`, `HOME` and `PYTHONIOENCODING` and
+nothing else: `OPENCODE_CONFIG_CONTENT` can be a whole configuration with provider keys in it, and
+filing a skill on a shelf has no use for one.
+
 Where `opencode.jsonc` sits beside `opencode.json`, the `.jsonc` is the one OpenCode loads — so it
 is the one read here, and the other is reported as shadowed rather than quietly used instead.
 
@@ -234,9 +239,12 @@ agents, five spellings, and only Claude Code keys by the directory:
 | Pi | `/skill:<declared name>` |
 
 Nothing is claimed until it happens: the panel writes, reads back, and says **Copied** only when the
-read agrees. It says **Sent to the clipboard** where it had to shell out and cannot read the result
-back, and if neither path was reachable it says so in red and prints the command for you to select
-by hand.
+read agrees. It says **Sent to the clipboard** where it had to hand the text to `wl-copy` and cannot
+read the result back, says so in red if `wl-copy` then fails, and if neither path was reachable says
+so and prints the command for you to select by hand. `wl-copy` is given the text on its standard
+input, never as an argument: the copy of it that stays behind to serve the clipboard keeps its
+arguments, and any account on the machine can read those for as long as the text is on the
+clipboard.
 
 A skill arriving inside a Claude Code plugin is addressed through it, so that row copies
 `/impeccable:impeccable` rather than `/impeccable`. Which version is read is not guessed either —
@@ -438,7 +446,7 @@ bin/agent-skills doctor
 ```
 
 ```
-agent-skills 1.1.0   scan 27.2 ms
+agent-skills 1.1.1   scan 27.2 ms
 skills            56
   claude          16   ~1406 tok always on
   codex            8   ~808 tok always on
@@ -473,6 +481,19 @@ agent reads it. Leave the text off to clear the note that is there:
 bin/agent-skills describe note nextjs 'why I keep this'
 bin/agent-skills describe note nextjs
 ```
+
+The panel runs both with `--stdin` instead, and hands over the change as one JSON object on
+standard input. What you typed and the names of your skill directories therefore never appear in a
+command line, which every account on the machine can read for as long as the process runs:
+
+```
+printf '%s' '{"skill": "nextjs", "text": "why I keep this"}' | bin/agent-skills describe note --stdin
+printf '%s' '{"skill": "nextjs", "category": "ui", "create": false}' | bin/agent-skills category assign --stdin
+```
+
+A request is at most 16 KiB, has exactly the keys its verb takes, with the types it takes them in,
+and arrives within five seconds, or nothing is written. The refusal names the rule, never what was
+sent.
 
 Those two verbs are the whole of what this program writes. There is no third, and there is no
 subprocess: `scan` and `doctor` read, and everything they report about a skill is reported as it
