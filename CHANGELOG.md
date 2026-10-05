@@ -25,7 +25,9 @@ the helper reads to find what OpenCode loads (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME
 `OPENCODE_DISABLE_EXTERNAL_SKILLS`); through 1.1.0 only the last one was passed, so
 the panel counted directories OpenCode had stopped reading. The writes get `PATH`,
 `HOME` and `PYTHONIOENCODING` only, and an empty `HOME` is left out rather than read
-by Python as `/`.
+by Python as `/`. Their `PATH` is the system's own `/usr/bin:/bin`, no longer with
+`/usr/local/bin` in front of it, and the helper's shebang names `/usr/bin/python3`
+rather than looking it up with `env`.
 
 **The update prompt quotes what it read.** Names, paths, versions, hashes and plugin
 sources are in double quotes with JSON escaping, under a line saying they are data,

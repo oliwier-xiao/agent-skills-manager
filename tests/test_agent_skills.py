@@ -2056,7 +2056,7 @@ def run_helper(home, *argv, stdin=b"", timeout=30):
     cleared environment with HOME, PATH and PYTHONIOENCODING, and a request on
     stdin. Out of process, because what is being tested is what reaches fd 0."""
     import subprocess  # the tests may start the helper; the helper starts nothing
-    env = {"HOME": home, "PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.run([sys.executable, "-B", HELPER, *argv], input=stdin, env=env,
                           capture_output=True, timeout=timeout, check=False)
     return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")

@@ -177,11 +177,9 @@ Panel {
   }
   readonly property string pluginDir: root.fromFileUrl(Qt.resolvedUrl("."))
   readonly property string helperPath: root.pluginDir + "/bin/agent-skills"
-  // The helper's shebang is `#!/usr/bin/env python3`, and that is a PATH lookup
-  // done by env at a moment nothing here has a say in. Naming the interpreter and
-  // handing it the helper as a script means the shebang is never reached, so
-  // which Python runs stops being a search result and becomes a decision written
-  // down in one place.
+  // Named here rather than left to the helper's shebang: handing the interpreter
+  // the helper as a script means the shebang is never reached, so which Python
+  // runs is a decision written down in one place, not whatever the file says.
   readonly property string pythonPath: "/usr/bin/python3"
   readonly property string homeDir: String(Quickshell.env("HOME") || "")
 
@@ -245,7 +243,7 @@ Panel {
   // function that reads the environment.
   function baseEnvironment() {
     var env = {
-      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "PATH": "/usr/bin:/bin",
       "PYTHONIOENCODING": "utf-8"
     }
     if (root.homeDir !== "") env["HOME"] = root.homeDir
@@ -807,8 +805,8 @@ Panel {
 
   Process {
     id: scanProc
-    // stderr is left on Quickshell's default so the helper's diagnostics land in
-    // `qs log`, which is where its own docstring promises they will be.
+    // No stderr parser: Quickshell then closes that pipe and drops what arrives, so
+    // nothing the helper says about a file it was reading reaches `qs log`.
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
