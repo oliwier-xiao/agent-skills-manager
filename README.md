@@ -10,9 +10,23 @@ This is that list: everything all five can load, with what it costs in tokens on
 agent can see it, and the command that invokes it — on your clipboard, in the spelling that agent
 expects.
 
-| Install | Update | Remove |
-|---|---|---|
-| `omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --enable` | `omarchy plugin update oliwier.agent-skills-manager` | `omarchy plugin remove oliwier.agent-skills-manager` |
+**Install**
+
+```
+omarchy plugin add https://github.com/oliwier-xiao/agent-skills-manager.git --enable
+```
+
+**Update**
+
+```
+omarchy plugin update oliwier.agent-skills-manager
+```
+
+**Remove**
+
+```
+omarchy plugin remove oliwier.agent-skills-manager
+```
 
 ![The panel, grouped by category](docs/panel.png)
 
