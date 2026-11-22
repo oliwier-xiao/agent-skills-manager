@@ -268,7 +268,8 @@ Panel {
   readonly property var forwardedEnvironment: [
     "OPENCODE_DISABLE_EXTERNAL_SKILLS",
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT"
+    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
+    "CLAUDE_CONFIG_DIR", "AGENT_SKILLS_CLAUDE_DIRS"
   ]
 
   function scanEnvironment() {
@@ -1462,8 +1463,14 @@ Panel {
       // it is your own words about this skill and they are the words you will
       // reach for when you go looking for it. It would be a poor kind of
       // storage that took them and then could not find them.
+      // Scope and mount paths too, so typing a Claude profile ("ihu") or a
+      // project ("proj cortex") narrows to what that one loads.
       haystack: root.fold(name + " " + desc + " "
-        + (describe ? describe.noteText : "") + " " + tax.category + " " + tags + " skill")
+        + (describe ? describe.noteText : "") + " " + tax.category + " " + tags + " skill "
+        + root.clean(item.scope, 16) + " "
+        + (item.mounts || []).map(function (m) {
+            return root.clean(m.path, 300) + " " + root.clean(m.profile || "", 16)
+          }).join(" "))
     }
   }
 

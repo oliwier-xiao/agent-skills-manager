@@ -38,7 +38,8 @@ ax = load()
 # alone therefore left the scan walking this machine's real directories, which
 # is how a test asserting an EMPTY home came back holding sixteen n8n skills.
 REDIRECTING_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-                    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT")
+                    "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
+                    "CLAUDE_CONFIG_DIR", "AGENT_SKILLS_CLAUDE_DIRS")
 
 
 @contextlib.contextmanager
@@ -2568,3 +2569,71 @@ class TheRemovedWriterLeftNothing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _skill(path, name, desc="Does a thing."):
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "SKILL.md"), "w") as fh:
+        fh.write(f"---\nname: {name}\ndescription: {desc}\n---\nbody\n")
+
+
+class ClaudeProfiles(unittest.TestCase):
+    """A second Claude account in ~/.claude-<name> is read, with its own state."""
+
+    def build(self, d):
+        _skill(os.path.join(d, ".claude", "skills", "mine"), "mine")
+        _skill(os.path.join(d, ".claude", "skills", "synced", "b1", "synced-one"), "synced-one")
+        work = os.path.join(d, ".claude-work")
+        _skill(os.path.join(work, "skills", "work-only"), "work-only")
+        with open(os.path.join(work, "settings.json"), "w") as fh:
+            json.dump({"skillOverrides": {"work-only": "off"}}, fh)
+        plug = os.path.join(work, "plugins", "synced", "b2", "abc-123")
+        os.makedirs(os.path.join(plug, ".claude-plugin"))
+        with open(os.path.join(plug, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"name": "data"}, fh)
+        _skill(os.path.join(plug, "skills", "analyze"), "analyze")
+        proj = os.path.join(d, "vault")
+        _skill(os.path.join(proj, ".claude", "skills", "proj-skill"), "proj-skill")
+        with open(os.path.join(work, ".claude.json"), "w") as fh:
+            json.dump({"projects": {proj: {}},
+                       "skillUsage": {"mine": {"usageCount": 2, "lastUsedAt": 5}}}, fh)
+        with open(os.path.join(d, ".claude.json"), "w") as fh:
+            json.dump({"skillUsage": {"mine": {"usageCount": 3, "lastUsedAt": 9}}}, fh)
+        os.makedirs(os.path.join(d, ".claude-empty-not-a-profile"))
+
+    def test_profiles_synced_plugins_projects(self):
+        r = scan_with_home(self.build)
+        by = {i["dirName"]: i for i in r["items"]}
+        self.assertEqual(by["mine"]["scope"], "user")
+        self.assertEqual(by["synced-one"]["scope"], "synced")
+        self.assertEqual(by["work-only"]["scope"], "work")
+        self.assertEqual(by["work-only"]["tools"], ["claude"])
+        self.assertEqual(by["work-only"]["state"]["claude"]["value"], "off")
+        self.assertTrue(by["work-only"]["state"]["claude"]["file"].endswith(".claude-work/settings.json"))
+        self.assertEqual(by["analyze"]["invocation"]["claude"], "/data:analyze")
+        self.assertEqual(by["analyze"]["scope"], "work plugin")
+        self.assertEqual(by["proj-skill"]["scope"], "proj vault")
+        self.assertEqual(by["mine"]["usage"]["count"], 5)
+        self.assertEqual(by["mine"]["usage"]["lastUsedAt"], 9)
+        labels = {p["label"]: p for p in r["claudeProfiles"]}
+        self.assertEqual(set(labels), {"user", "work"})
+        self.assertEqual(labels["work"]["skills"], 2)       # work-only, analyze
+        self.assertEqual(labels["work"]["alwaysOnTokens"],  # work-only is off
+                         by["analyze"]["tokens"]["alwaysOn"])
+        self.assertEqual(r["claudeProjects"]["skills"], 1)
+        self.assertFalse(any("synced" in f["what"] for f in r["findings"]))
+        self.assertIn("data", [p["name"] for p in r["plugins"]])
+
+    def test_explicit_dirs_replace_discovery(self):
+        d = tempfile.mkdtemp()
+        try:
+            self.build(d)
+            saved = ax.HOME
+            ax.HOME = d
+            try:
+                with env_without_redirects(AGENT_SKILLS_CLAUDE_DIRS=os.path.join(d, ".claude-work")):
+                    self.assertEqual([p["label"] for p in ax.claude_profiles()], ["work"])
+            finally:
+                ax.HOME = saved
+        finally:
+            shutil.rmtree(d)

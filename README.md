@@ -123,6 +123,25 @@ filing a skill on a shelf has no use for one.
 Where `opencode.jsonc` sits beside `opencode.json`, the `.jsonc` is the one OpenCode loads — so it
 is the one read here, and the other is reported as shadowed rather than quietly used instead.
 
+### More than one Claude Code profile
+
+Claude Code reads one configuration directory per process: `~/.claude`, or whatever
+`CLAUDE_CONFIG_DIR` names. A machine that keeps a second account beside the first — a work profile
+started through its own alias, say — has a second set of skills, plugins, settings and state. So
+every `~/.claude-*` directory holding a `settings.json`, `skills`, `plugins` or `.claude.json` is
+read as a profile of its own, and `CLAUDE_CONFIG_DIR` is added when it points anywhere else.
+`AGENT_SKILLS_CLAUDE_DIRS`, colon-separated, replaces that discovery outright.
+
+Inside each profile the scan also opens what the account syncs down — `skills/synced/<bucket>/`
+and `plugins/synced/<bucket>/<id>/`, the second addressed by the name in its
+`.claude-plugin/plugin.json` — and the `.claude/skills` of every project in that profile's history.
+
+The scope column says which one a row came from: `user` for `~/.claude`, the directory's suffix for
+the others (`work`, `work synced`, `work plugin`), and `proj <name>` for a project. Search reads it,
+so typing a profile or a project narrows the list to what a session there loads. The Claude box at
+the top is the union of all of them; `agent-skills doctor` prints the figure per profile, which is
+what one session actually pays for.
+
 Cursor is the greediest reader here and the reason a row can carry five marks: its own bundle names
 nine skill directories, four of them other agents'. Pi reads nobody else's.
 

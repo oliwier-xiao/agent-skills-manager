@@ -1277,6 +1277,130 @@ def read_opencode_config(findings: list | None = None) -> dict:
     return merged
 
 
+CLAUDE_PROFILE_MARKERS = ("settings.json", "skills", "plugins", ".claude.json")
+MAX_CLAUDE_PROFILES = 8
+MAX_PROJECT_ROOTS = 64
+
+
+def claude_profiles() -> list[dict]:
+    """Every Claude Code configuration directory on this machine.
+
+    Claude Code reads one directory per process: ~/.claude, or whatever
+    CLAUDE_CONFIG_DIR names. A machine that keeps a second account -- a work
+    profile beside a personal one, each started through its own alias -- has a
+    second set of skills, plugins, settings and state that the default walk
+    never opened. So every `~/.claude-*` directory that looks like a profile is
+    one, CLAUDE_CONFIG_DIR is added if it lives anywhere else, and
+    AGENT_SKILLS_CLAUDE_DIRS (colon-separated) replaces the discovery outright
+    for a machine laid out some other way.
+
+    The default profile keeps its state file at ~/.claude.json; every other
+    profile keeps it inside its own directory. `label` is what the row's scope
+    column prints: `user` for the default, so a one-profile machine reads
+    exactly as before, and the directory's suffix for the rest.
+    """
+    default = os.path.join(HOME, ".claude")
+    explicit = os.environ.get("AGENT_SKILLS_CLAUDE_DIRS")
+    if explicit:
+        dirs = [d for d in explicit.split(":") if d.startswith("/")]
+    else:
+        dirs = [default]
+        try:
+            names = sorted(os.listdir(HOME))
+        except OSError:
+            names = []
+        for name in names:
+            path = os.path.join(HOME, name)
+            if not name.startswith(".claude-") or not os.path.isdir(path):
+                continue
+            if any(os.path.exists(os.path.join(path, m)) for m in CLAUDE_PROFILE_MARKERS):
+                dirs.append(path)
+        configured = os.environ.get("CLAUDE_CONFIG_DIR")
+        if configured and configured.startswith("/"):
+            dirs.append(configured)
+    out, seen = [], set()
+    for d in dirs:
+        real = os.path.realpath(d)
+        if real in seen or len(out) >= MAX_CLAUDE_PROFILES:
+            continue
+        seen.add(real)
+        is_default = real == os.path.realpath(default)
+        base = os.path.basename(d.rstrip("/")).lstrip(".")
+        label = "user" if is_default else (base[len("claude-"):] if base.startswith("claude-")
+                                           else base) or "claude"
+        out.append({"dir": d, "label": clip(label, 10), "default": is_default,
+                    "state": (os.path.join(HOME, ".claude.json") if is_default
+                              else os.path.join(d, ".claude.json")),
+                    "settings": os.path.join(d, "settings.json")})
+    return out
+
+
+def _profile_overrides(profile: dict) -> dict:
+    settings, _ = read_json(profile["settings"])
+    return as_dict(as_dict(settings).get("skillOverrides"))
+
+
+def _profile_root(profile: dict, path: str, tools: list, scope: str, **extra) -> dict:
+    return {"path": path, "tools": tools, "scope": clip(scope, 16),
+            "profile": profile["label"], "settingsFile": profile["settings"], **extra}
+
+
+def _synced_buckets(path: str) -> list[str]:
+    """`<dir>/synced/<bucket>/`: where Claude Code writes what the account syncs
+    down, skills and plugins alike, one level deeper than anything a person
+    drops in by hand -- which is why the flat walk reported `synced` as a
+    directory without a SKILL.md and listed nothing inside it."""
+    base = os.path.join(path, "synced")
+    try:
+        with os.scandir(base) as listing:
+            return sorted(e.path for e in listing
+                          if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def claude_profile_roots(oc: list) -> list[dict]:
+    """The skill roots of every Claude profile, its synced skills, its plugins,
+    and the project-level `.claude/skills` of every project it has opened."""
+    roots: list[dict] = []
+    seen: set[str] = set()
+
+    def add(root):
+        real = os.path.realpath(root["path"])
+        if real not in seen:
+            seen.add(real)
+            roots.append(root)
+
+    profiles = claude_profiles()
+    for p in profiles:
+        # Only ~/.claude/skills is read by the other agents; a second profile's
+        # directory is Claude Code's alone.
+        tools = (["claude", "cursor"] + oc) if p["default"] else ["claude"]
+        add(_profile_root(p, os.path.join(p["dir"], "skills"), tools, p["label"]))
+        for bucket in _synced_buckets(os.path.join(p["dir"], "skills")):
+            add(_profile_root(p, bucket, ["claude"],
+                              "synced" if p["default"] else f"{p['label']} synced"))
+    for p in profiles:
+        for root in plugin_skill_roots(p) + synced_plugin_skill_roots(p):
+            add(root)
+    for p in profiles:
+        state, _ = read_json(p["state"], max_bytes=LARGE_STATE_READ)
+        for project in sorted(as_dict(as_dict(state).get("projects"))):
+            if len(seen) >= MAX_PROJECT_ROOTS + 3 * len(profiles):
+                break
+            if not isinstance(project, str) or not project.startswith("/"):
+                continue
+            path = os.path.join(project, ".claude", "skills")
+            if os.path.isdir(path):
+                name = os.path.basename(project.rstrip("/")) or "/"
+                root = _profile_root(p, path, ["claude"], f"proj {name}")
+                # Loaded only in a session opened in that project, so it is in
+                # no profile's always-on figure.
+                root["profile"] = None
+                add(root)
+    return roots
+
+
 def skill_roots() -> list[dict]:
     """Every directory the agents look in, and which of them look there.
 
@@ -1306,10 +1430,8 @@ def skill_roots() -> list[dict]:
     # rows that are already here. Pi is the opposite and reads nobody else's --
     # its binary has no reference to .claude/skills or .agents/skills at all.
     oc = ["opencode"] if oc_external else []
-    claude_tools = ["claude", "cursor"] + oc
     agents_tools = ["codex", "cursor"] + oc
     roots = [
-        {"path": f"{HOME}/.claude/skills", "tools": claude_tools, "scope": "user"},
         {"path": os.path.join(opencode_config_dir(), "skills"),
          "tools": ["opencode"], "scope": "user"},
         {"path": f"{HOME}/.codex/skills", "tools": ["codex", "cursor"], "scope": "user"},
@@ -1337,10 +1459,40 @@ def skill_roots() -> list[dict]:
     if extra:
         roots.append({"path": os.path.join(extra, "skills"),
                       "tools": ["opencode"], "scope": "user"})
-    return roots + plugin_skill_roots()
+    # Claude's first, so a skill reached from ~/.claude/skills and from another
+    # agent's root is filed under the profile that owns it.
+    return claude_profile_roots(oc) + roots
 
 
-def plugin_skill_roots() -> list[dict]:
+def synced_plugin_skill_roots(profile: dict) -> list[dict]:
+    """Plugins the account syncs down, under `plugins/synced/<bucket>/<id>/`.
+
+    These have no installed_plugins.json entry: the directory is named by an id
+    and the plugin's own `.claude-plugin/plugin.json` carries the name Claude
+    Code addresses it by (`/data:analyze`), so that is the one read here.
+    """
+    out = []
+    for bucket in _synced_buckets(os.path.join(profile["dir"], "plugins")):
+        try:
+            with os.scandir(bucket) as listing:
+                entries = sorted(e.path for e in listing
+                                 if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
+        for path in entries:
+            meta, _ = read_json(os.path.join(path, ".claude-plugin", "plugin.json"))
+            name = as_dict(meta).get("name")
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+                name = os.path.basename(path)
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+                    continue
+            out.append(_profile_root(profile, os.path.join(path, "skills"), ["claude"],
+                                     "plugin" if profile["default"] else f"{profile['label']} plugin",
+                                     plugin=name, marketplace="", sha=""))
+    return out
+
+
+def plugin_skill_roots(profile: dict | None = None) -> list[dict]:
     """The skills a Claude Code plugin brings with it.
 
     These were invisible. The four roots above are the ones a user drops a
@@ -1359,7 +1511,12 @@ def plugin_skill_roots() -> list[dict]:
     Only Claude Code sees these. OpenCode reads ~/.claude/skills natively but
     not another agent's plugin cache, so `tools` is Claude alone.
     """
-    value, err = read_json(f"{HOME}/.claude/plugins/installed_plugins.json")
+    if profile is None:
+        profiles = claude_profiles()
+        if not profiles:
+            return []
+        profile = profiles[0]
+    value, err = read_json(os.path.join(profile["dir"], "plugins", "installed_plugins.json"))
     if err or not isinstance(value, dict):
         return []
     out = []
@@ -1381,12 +1538,11 @@ def plugin_skill_roots() -> list[dict]:
             # a commit somebody can name. Carried onto the row rather than left
             # on the plugin, because the row is what a reader is looking at.
             sha = as_dict(entry).get("gitCommitSha")
-            out.append({"path": os.path.join(path, "skills"),
-                        "tools": ["claude"],
-                        "scope": clip(as_dict(entry).get("scope") or "plugin", 16),
-                        "plugin": name,
-                        "marketplace": clip(market, 128),
-                        "sha": clip(sha, 64) if isinstance(sha, str) else ""})
+            scope = clip(as_dict(entry).get("scope") or "plugin", 16)
+            out.append(_profile_root(profile, os.path.join(path, "skills"), ["claude"],
+                                     scope if profile["default"] else f"{profile['label']} {scope}",
+                                     plugin=name, marketplace=clip(market, 128),
+                                     sha=clip(sha, 64) if isinstance(sha, str) else ""))
     return out
 
 
@@ -1493,15 +1649,34 @@ def scan(divisor: int = 4) -> dict:
     findings: list[dict] = []
     by_real: dict[str, dict] = {}
 
-    claude_settings, err = read_json(f"{HOME}/.claude/settings.json")
-    if err:
-        findings.append({"what": "claude settings.json", "detail": err})
-    overrides = as_dict(as_dict(claude_settings).get("skillOverrides"))
-
-    claude_state, err = read_json(f"{HOME}/.claude.json", max_bytes=LARGE_STATE_READ)
-    if err:
-        findings.append({"what": "claude.json", "detail": err})
-    usage = as_dict(as_dict(claude_state).get("skillUsage"))
+    # Every profile's switches and usage. Overrides stay per profile, because a
+    # skill can be off in one account and on in the other; usage is summed,
+    # because "how often do I reach for this" is a question about the person.
+    profiles = claude_profiles()
+    overrides_by_settings: dict[str, dict] = {}
+    usage: dict[str, dict] = {}
+    for p in profiles:
+        settings, err = read_json(p["settings"])
+        if err and p["default"]:
+            findings.append({"what": "claude settings.json", "detail": err})
+        overrides_by_settings[p["settings"]] = as_dict(as_dict(settings).get("skillOverrides"))
+        state, err = read_json(p["state"], max_bytes=LARGE_STATE_READ)
+        if err and p["default"]:
+            findings.append({"what": "claude.json", "detail": err})
+        for key, u in as_dict(as_dict(state).get("skillUsage")).items():
+            u = as_dict(u)
+            c = u.get("usageCount")
+            c = c if isinstance(c, int) and not isinstance(c, bool) and c > 0 else 0
+            last = u.get("lastUsedAt")
+            last = last if _finite_number(last) else None
+            if not c and last is None:
+                continue
+            have = usage.setdefault(key, {"usageCount": 0, "lastUsedAt": None})
+            have["usageCount"] += c
+            if last is not None and (have["lastUsedAt"] is None or last > have["lastUsedAt"]):
+                have["lastUsedAt"] = last
+    default_settings = profiles[0]["settings"] if profiles else f"{HOME}/.claude/settings.json"
+    overrides = overrides_by_settings.get(default_settings, {})
 
     catalog_cat = _catalog_categories(findings)
     store = read_store(findings)
@@ -1530,6 +1705,10 @@ def scan(divisor: int = 4) -> dict:
             if entry.name.startswith("."):
                 if entry.name != ".system":
                     continue
+            # Walked as roots of their own by claude_profile_roots().
+            if entry.name == "synced" and root.get("settingsFile") \
+                    and os.path.basename(base) == "skills":
+                continue
             # Deciding what an entry is, and listing a `.system` directory, both
             # follow the name to whatever it points at, and the kernel says no
             # far more often than it says "missing": a link pointing at itself
@@ -1571,7 +1750,8 @@ def scan(divisor: int = 4) -> dict:
                 if _walk_exhausted(by_real, findings, deadline, tilde(entry.path)):
                     break
                 try:
-                    _ingest(by_real, path, base, root, overrides, usage,
+                    _ingest(by_real, path, base, root,
+                            overrides_by_settings.get(root.get("settingsFile"), overrides), usage,
                             catalog_cat, store, descriptions, divisor, findings, bundled=bundled)
                 except Exception as exc:  # noqa: BLE001 - one skill is one finding
                     findings.append({"what": tilde(clip(path, 200)),
@@ -1584,7 +1764,21 @@ def scan(divisor: int = 4) -> dict:
     plugins = scan_claude_plugins(findings)
     for item in items:
         _bound_paths(item)
+    profile_counts = []
+    for p in claude_profiles():
+        mine = [it for it in items
+                if any(m.get("profile") == p["label"] for m in it["mounts"])]
+        profile_counts.append({
+            "label": p["label"], "dir": tilde(p["dir"]), "skills": len(mine),
+            "alwaysOnTokens": sum(it["tokens"]["alwaysOn"] for it in mine
+                                  if it["state"].get("claude", {}).get("value") != "off")})
+    project_items = [it for it in items if it["scope"].startswith("proj ")]
     return {
+        # Per Claude profile, because the `claude` total above is the union of
+        # every profile and every project -- more than any one session loads.
+        "claudeProfiles": profile_counts,
+        "claudeProjects": {"skills": len(project_items),
+                           "alwaysOnTokens": sum(it["tokens"]["alwaysOn"] for it in project_items)},
         "version": VERSION,
         "generatedAt": int(time.time()),
         "elapsedMs": round((time.monotonic() - started) * 1000, 1),
@@ -1692,7 +1886,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                 # something gets deleted that nobody pointed at.
                 existing["mounts"].append(
                     {"tool": tool, "path": mount_path, "abs": dir_path,
-                     "link": "symlink" if is_link else "real"})
+                     "link": "symlink" if is_link else "real",
+                     "profile": root.get("profile")})
             # One file reachable from several roots is one skill in several tools.
             # diagnose-crash is a single SKILL.md that several agents load, and
             # a `tools` list left at whichever root was scanned first would hide
@@ -1701,7 +1896,8 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
                 existing["tools"].append(tool)
                 existing["state"].update(
                     _skill_state(existing["dirName"], existing["displayName"], [tool],
-                                 overrides, existing["flags"]["builtin"]))
+                                 overrides, existing["flags"]["builtin"],
+                                 root.get("settingsFile")))
         return
 
     why: list[str] = []
@@ -1794,10 +1990,12 @@ def _ingest(by_real, dir_path, base, root, overrides, usage, catalog_cat, store,
         "scope": "bundled" if bundled else root["scope"],
         "linkage": "symlink" if is_link else "real",
         "mounts": [{"tool": t, "path": mount_path, "abs": dir_path,
-                    "link": "symlink" if is_link else "real"}
+                    "link": "symlink" if is_link else "real",
+                    "profile": root.get("profile") if t == "claude" else None}
                    for t in root["tools"]],
         "tools": list(root["tools"]),
-        "state": _skill_state(dir_name, display, root["tools"], overrides, bundled),
+        "state": _skill_state(dir_name, display, root["tools"], overrides, bundled,
+                              root.get("settingsFile")),
         # A plugin's skill is addressed through its plugin: Claude Code calls it
         # `/impeccable:impeccable`, not `/impeccable`. Getting this wrong hands
         # the user a command their agent does not have.
@@ -1911,14 +2109,14 @@ def _claude_override(overrides, dir_name, declared_name):
     return "on"
 
 
-def _skill_state(dir_name, declared_name, tools, overrides, bundled):
+def _skill_state(dir_name, declared_name, tools, overrides, bundled, settings_file=None):
     state = {}
     if "claude" in tools:
         state["claude"] = {
             "value": _claude_override(overrides, dir_name, declared_name),
             "ladder": ["on", "name-only", "user-invocable-only", "off"],
             "writable": not bundled,
-            "file": tilde(f"{HOME}/.claude/settings.json"),
+            "file": tilde(settings_file or f"{HOME}/.claude/settings.json"),
         }
     if "opencode" in tools:
         # Not writable, and the honest reason is that nobody has found the switch.
@@ -1948,7 +2146,14 @@ def _skill_state(dir_name, declared_name, tools, overrides, bundled):
 
 
 def _catalog_categories(findings: list | None = None) -> dict:
-    data, err = read_json(f"{HOME}/.claude/plugins/plugin-catalog-cache.json",
+    out: dict[str, str] = {}
+    for p in reversed(claude_profiles()):
+        out.update(_catalog_categories_in(p["dir"], findings if p["default"] else None))
+    return out
+
+
+def _catalog_categories_in(claude_dir: str, findings: list | None = None) -> dict:
+    data, err = read_json(os.path.join(claude_dir, "plugins", "plugin-catalog-cache.json"),
                           max_bytes=LARGE_STATE_READ)
     # Said, because the categories it would have given read as the classifier's
     # own guesses otherwise, which is a change nobody can see the reason for.
@@ -1995,26 +2200,28 @@ def scan_mcp(findings: list[dict]) -> list[dict]:
             "auth": "unknown", "writable": False,
         })
 
-    state, _ = read_json(f"{HOME}/.claude.json", max_bytes=LARGE_STATE_READ)
-    for name, cfg in as_dict(as_dict(state).get("mcpServers")).items():
-        cfg = as_dict(cfg)
-        argv = [str(cfg.get("command", ""))] + [str(a) for a in as_list(cfg.get("args"))]
-        servers.append({
-            "kind": "mcp", "tool": "claude", "name": clip(name, 128),
-            "transport": clip(cfg.get("type", "stdio"), 32),
-            "target": redact(cfg["url"]) if cfg.get("url") else redact_argv(argv),
-            "enabled": True, "scope": "user", "auth": "unknown", "writable": False,
-        })
+    for p in claude_profiles():
+        state, _ = read_json(p["state"], max_bytes=LARGE_STATE_READ)
+        for name, cfg in as_dict(as_dict(state).get("mcpServers")).items():
+            cfg = as_dict(cfg)
+            argv = [str(cfg.get("command", ""))] + [str(a) for a in as_list(cfg.get("args"))]
+            servers.append({
+                "kind": "mcp", "tool": "claude", "name": clip(name, 128),
+                "transport": clip(cfg.get("type", "stdio"), 32),
+                "target": redact(cfg["url"]) if cfg.get("url") else redact_argv(argv),
+                "enabled": True, "scope": p["label"], "auth": "unknown", "writable": False,
+            })
 
-    # claude.ai connectors are not on disk. Live state needs the API; the names
-    # survive offline in claudeAiMcpEverConnected, which is why this degrades to
-    # a greyed list rather than an empty one.
-    for name in as_list(as_dict(state).get("claudeAiMcpEverConnected")):
-        servers.append({
-            "kind": "mcp", "tool": "claude", "name": clip(name, 128), "transport": "http",
-            "target": "", "enabled": None, "scope": "account",
-            "auth": "unknown", "writable": False, "source": "claudeAiMcpEverConnected",
-        })
+        # claude.ai connectors are not on disk. Live state needs the API; the names
+        # survive offline in claudeAiMcpEverConnected, which is why this degrades to
+        # a greyed list rather than an empty one.
+        for name in as_list(as_dict(state).get("claudeAiMcpEverConnected")):
+            servers.append({
+                "kind": "mcp", "tool": "claude", "name": clip(name, 128), "transport": "http",
+                "target": "", "enabled": None,
+                "scope": "account" if p["default"] else clip(f"{p['label']} account", 16),
+                "auth": "unknown", "writable": False, "source": "claudeAiMcpEverConnected",
+            })
     return servers
 
 
@@ -2030,19 +2237,35 @@ def _opencode_auth(name: str) -> str:
 
 
 def scan_claude_plugins(findings: list[dict]) -> list[dict]:
-    installed, err = read_json(f"{HOME}/.claude/plugins/installed_plugins.json")
-    if err:
+    out = []
+    for p in claude_profiles():
+        out += _scan_profile_plugins(p, findings)
+    return out
+
+
+def _scan_profile_plugins(profile: dict, findings: list[dict]) -> list[dict]:
+    installed, err = read_json(os.path.join(profile["dir"], "plugins", "installed_plugins.json"))
+    if err and profile["default"]:
         findings.append({"what": "installed_plugins.json", "detail": err})
-    settings, _ = read_json(f"{HOME}/.claude/settings.json")
+    settings, _ = read_json(profile["settings"])
     enabled = as_dict(as_dict(settings).get("enabledPlugins"))
     out = []
+    for root in synced_plugin_skill_roots(profile):
+        out.append({
+            "kind": "plugin", "tool": "claude", "name": clip(root["plugin"], 128),
+            "version": None, "scope": root["scope"], "enabled": True,
+            "installPath": clip(os.path.dirname(root["path"]), 4096),
+            "origin": {"type": "synced", "installedSha": None},
+            "writable": False,
+        })
     for pid, records in as_dict(as_dict(installed).get("plugins")).items():
         for rec in as_list(records):
             rec = as_dict(rec)
             out.append({
                 "kind": "plugin", "tool": "claude", "name": clip(pid, 128),
                 "version": _scalar(rec.get("version"), 64),
-                "scope": _scalar(rec.get("scope"), 32) or "user",
+                "scope": (_scalar(rec.get("scope"), 32) or "user") if profile["default"]
+                         else clip(f"{profile['label']} {_scalar(rec.get('scope'), 32) or 'user'}", 16),
                 "enabled": enabled.get(pid, True) is not False,
                 "installPath": _scalar(rec.get("installPath"), 4096),
                 "origin": {"type": "marketplace",
@@ -2555,6 +2778,12 @@ def main(argv: list[str]) -> int:
         print(f"skills            {c['skills']}")
         for tool, n in sorted(c["perTool"].items()):
             print(f"  {tool:<14}{n:>4}   ~{c['alwaysOnTokens'].get(tool, 0)} tok always on")
+        print("claude profiles   (what one session in each loads, projects aside)")
+        for p in result["claudeProfiles"]:
+            print(f"  {p['label']:<14}{p['skills']:>4}   ~{p['alwaysOnTokens']} tok always on   {p['dir']}")
+        pj = result["claudeProjects"]
+        if pj["skills"]:
+            print(f"  {'projects':<14}{pj['skills']:>4}   ~{pj['alwaysOnTokens']} tok, only inside their project")
         print(f"mcp servers       {len(result['mcp'])}")
         print(f"claude plugins    {len(result['plugins'])}")
         up = [t for t, on in sorted(result["running"].items()) if on]
